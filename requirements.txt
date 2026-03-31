@@ -1,2 +1,5 @@
+# Bağımlılıklar pyproject.toml ile senkron tutulur.
+# Manuel venv kurulumu için: pip install -r requirements.txt
+# Önerilen kurulum:          pipx install .
 aiomysql>=0.2.0
 rich>=13.0.0

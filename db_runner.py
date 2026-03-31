@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-db-runner: MySQL/MariaDB için toplu SQL gönderme aracı
+db-runner: MySQL/MariaDB veritabanlarına toplu SQL gönderme aracı
 
 Kullanım:
-  python db_runner.py                        # connections.json kullan, vim ile SQL al
-  python db_runner.py -c /path/to/conn.json  # farklı config dosyası
-  python db_runner.py --sql query.sql         # SQL'i dosyadan oku
+  db-runner                          # vim ile SQL gir
+  db-runner -c /path/to/servers.json # farklı config dosyası
+  db-runner --sql query.sql          # SQL'i dosyadan oku
+  db-runner --help                   # tüm seçenekler
 """
 
 import argparse
