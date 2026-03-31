@@ -9,6 +9,8 @@ Kullanım:
 """
 
 import argparse
+import csv
+import io
 import asyncio
 import json
 import os
@@ -514,8 +516,74 @@ async def run_sql_on_all(
 # 7. Log görüntüleme
 # ---------------------------------------------------------------------------
 
-def show_log(results: list[dict], sql: str, dry_run: bool = False) -> None:
-    """Sonuçları özet panelde ve vim'de göster."""
+def format_results(
+    results: list[dict],
+    sql: str,
+    log_format: str,
+    dry_run: bool,
+    timestamp: str,
+) -> str:
+    """Sonuçları istenen formatta string'e dönüştür."""
+    dry_count = sum(1 for r in results if r["status"] == "DRY")
+    ok_count  = sum(1 for r in results if r["status"] == "OK")
+    err_count = sum(1 for r in results if r["status"] == "ERR")
+    sorted_results = sorted(results, key=lambda x: (x["status"] != "ERR", x["server"], x["db"]))
+
+    if log_format == "json":
+        payload = {
+            "timestamp": timestamp,
+            "dry_run": dry_run,
+            "sql": sql,
+            "summary": {"total": len(results), "ok": ok_count, "err": err_count, "dry": dry_count},
+            "results": [
+                {k: v for k, v in r.items() if k != "rows"}
+                for r in sorted_results
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+    if log_format == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["timestamp", "server", "db", "status", "affected", "error"])
+        for r in sorted_results:
+            writer.writerow([timestamp, r["server"], r["db"], r["status"], r["affected"], r["error"] or ""])
+        return buf.getvalue()
+
+    # plain (varsayılan)
+    dry_tag = "  [DRY RUN]" if dry_run else ""
+    lines = [
+        f"# db-runner Log — {timestamp}{dry_tag}",
+        f"# Toplam: {len(results)}  Başarılı: {ok_count}  Hatalı: {err_count}"
+        + (f"  DryRun: {dry_count}" if dry_run else ""),
+        "#",
+        "# Çalıştırılan SQL:",
+        *[f"#   {line}" for line in sql.splitlines()],
+        "#",
+        "# ─────────────────────────────────────────────────────────────",
+        "# Kaydetmek için:  :w /tam/yol/dosya.log",
+        "# Çıkmak için:     :q",
+        "# ─────────────────────────────────────────────────────────────",
+        "",
+    ]
+    for r in sorted_results:
+        if r["status"] == "OK":
+            lines.append(f"[OK]  {r['server']}:{r['db']}  affected={r['affected']}")
+        elif r["status"] == "DRY":
+            lines.append(f"[DRY] {r['server']}:{r['db']}")
+        else:
+            lines.append(f"[ERR] {r['server']}:{r['db']}  {r['error']}")
+    return "\n".join(lines) + "\n"
+
+
+def show_log(
+    results: list[dict],
+    sql: str,
+    dry_run: bool = False,
+    log_format: str = "plain",
+    failed_output: Optional[str] = None,
+) -> None:
+    """Sonuçları özet panelde ve vim'de göster; isteğe bağlı dosyaya kaydet."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
     ok_count  = sum(1 for r in results if r["status"] == "OK")
     err_count = sum(1 for r in results if r["status"] == "ERR")
@@ -538,33 +606,18 @@ def show_log(results: list[dict], sql: str, dry_run: bool = False) -> None:
         border_style=summary_color,
     ))
 
-    # Log içeriği oluştur
-    dry_tag = "  [DRY RUN]" if dry_run else ""
-    header_lines = [
-        f"# db-runner Log — {timestamp}{dry_tag}",
-        f"# Toplam: {len(results)}  Başarılı: {ok_count}  Hatalı: {err_count}"
-        + (f"  DryRun: {dry_count}" if dry_run else ""),
-        "#",
-        "# Çalıştırılan SQL:",
-        *[f"#   {line}" for line in sql.splitlines()],
-        "#",
-        "# ─────────────────────────────────────────────────────────────",
-        "# Kaydetmek için:  :w /tam/yol/dosya.log",
-        "# Çıkmak için:     :q",
-        "# ─────────────────────────────────────────────────────────────",
-        "",
-    ]
+    # Hatalı DB'leri ayrı dosyaya kaydet
+    failed_results = [r for r in results if r["status"] == "ERR"]
+    if failed_output and failed_results:
+        try:
+            with open(failed_output, "w") as f:
+                for r in failed_results:
+                    f.write(f"{r['server']}:{r['db']}\n")
+            console.print(f"[yellow]⚠[/] {len(failed_results)} hatalı DB '{failed_output}' dosyasına kaydedildi.")
+        except OSError as exc:
+            console.print(f"[red]Hata: failed-output yazılamadı:[/] {exc}")
 
-    result_lines = []
-    for r in sorted(results, key=lambda x: (x["status"] != "ERR", x["server"], x["db"])):
-        if r["status"] == "OK":
-            result_lines.append(f"[OK]  {r['server']}:{r['db']}  affected={r['affected']}")
-        elif r["status"] == "DRY":
-            result_lines.append(f"[DRY] {r['server']}:{r['db']}")
-        else:
-            result_lines.append(f"[ERR] {r['server']}:{r['db']}  {r['error']}")
-
-    log_content = "\n".join(header_lines + result_lines) + "\n"
+    log_content = format_results(results, sql, "plain", dry_run, timestamp)
 
     console.print("\n[bold cyan]► Vim açılıyor[/] — log görüntüleniyor [dim](:w dosya.log ile kaydet, :q ile çık)[/]\n")
 
@@ -631,6 +684,17 @@ def main() -> None:
         "--no-transaction",
         action="store_true",
         help="Transaction kullanma, autocommit modunda çalış",
+    )
+    parser.add_argument(
+        "--log-format",
+        choices=["plain", "json", "csv"],
+        default="plain",
+        help="Log kayıt formatı: plain (varsayılan), json, csv",
+    )
+    parser.add_argument(
+        "--failed-output",
+        metavar="DOSYA",
+        help="Hatalı DB'leri sunucu:db formatında bu dosyaya kaydet",
     )
     args = parser.parse_args()
 
@@ -701,7 +765,7 @@ def main() -> None:
         sys.exit(0)
 
     # 7. Log göster
-    show_log(results, sql, dry_run=dry_run)
+    show_log(results, sql, dry_run=dry_run, log_format=args.log_format, failed_output=args.failed_output)
 
 
 if __name__ == "__main__":
