@@ -5,7 +5,8 @@
     "port": 3306,
     "user": "myuser",
     "password": "mypassword",
-    "max_connections": 3
+    "max_connections": 3,
+    "tags": ["prod", "eu"]
   },
   {
     "name": "prod-2",

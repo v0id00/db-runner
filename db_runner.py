@@ -128,6 +128,7 @@ def load_connections(path: str) -> list[dict]:
         conn.setdefault("port", 3306)
         conn.setdefault("name", conn["host"])
         conn.setdefault("max_connections", 3)
+        conn.setdefault("tags", [])
 
     return conns
 
@@ -834,6 +835,11 @@ def main() -> None:
         help="Filter connections by name/alias using a regex",
     )
     parser.add_argument(
+        "--tags",
+        metavar="TAG1,TAG2",
+        help="Filter connections by tags (comma-separated; matches any)",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -863,6 +869,14 @@ def main() -> None:
             console.print(f"[red]Error:[/] --server filter '{args.server}' matched no connections.")
             sys.exit(1)
         console.print(f"[dim]--server filter: {len(connections)} connection(s) matched.[/]")
+
+    if args.tags:
+        tag_list = [t.strip() for t in args.tags.split(",")]
+        connections = [c for c in connections if any(t in c.get("tags", []) for t in tag_list)]
+        if not connections:
+            console.print(f"[red]Error:[/] --tags filter '{args.tags}' matched no connections.")
+            sys.exit(1)
+        console.print(f"[dim]--tags filter '{args.tags}': {len(connections)} connection(s) matched.[/]")
 
     # 2. Get SQL
     if args.sql:
