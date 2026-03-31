@@ -417,6 +417,7 @@ async def execute_on_db(
     use_transaction: bool = True,
     show_results: bool = False,
     stop_event: Optional[asyncio.Event] = None,
+    retry: int = 0,
 ) -> None:
     """Execute SQL on one database (rate-limited by semaphore)."""
     server_name = conn["name"]
@@ -438,42 +439,51 @@ async def execute_on_db(
             progress.advance(task_id)
             return
 
-        try:
-            connection = await aiomysql.connect(
-                host=conn["host"],
-                port=conn["port"],
-                user=conn["user"],
-                password=conn["password"],
-                db=db_name,
-                connect_timeout=timeout,
-                autocommit=not use_transaction,
-            )
+        last_error: Optional[Exception] = None
+        for attempt in range(max(1, retry + 1)):
             try:
-                async with connection.cursor() as cursor:
-                    await asyncio.wait_for(cursor.execute(sql), timeout=timeout)
-                    affected = cursor.rowcount
-                    rows = None
-                    if show_results:
-                        rows = await cursor.fetchall()
-                        col_names = [d[0] for d in cursor.description] if cursor.description else []
-                        rows = {"columns": col_names, "data": [list(row) for row in rows]}
+                connection = await aiomysql.connect(
+                    host=conn["host"],
+                    port=conn["port"],
+                    user=conn["user"],
+                    password=conn["password"],
+                    db=db_name,
+                    connect_timeout=timeout,
+                    autocommit=not use_transaction,
+                )
+                try:
+                    async with connection.cursor() as cursor:
+                        await asyncio.wait_for(cursor.execute(sql), timeout=timeout)
+                        affected = cursor.rowcount
+                        rows = None
+                        if show_results:
+                            rows = await cursor.fetchall()
+                            col_names = [d[0] for d in cursor.description] if cursor.description else []
+                            rows = {"columns": col_names, "data": [list(row) for row in rows]}
+                        if use_transaction:
+                            await connection.commit()
+                        results.append({
+                            "server": server_name,
+                            "db": db_name,
+                            "status": "OK",
+                            "affected": affected,
+                            "error": None,
+                            "rows": rows,
+                        })
+                except Exception:
                     if use_transaction:
-                        await connection.commit()
-                    results.append({
-                        "server": server_name,
-                        "db": db_name,
-                        "status": "OK",
-                        "affected": affected,
-                        "error": None,
-                        "rows": rows,
-                    })
-            except Exception:
-                if use_transaction:
-                    await connection.rollback()
-                raise
-            finally:
-                connection.close()
-        except Exception as e:
+                        await connection.rollback()
+                    raise
+                finally:
+                    connection.close()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < retry:
+                    await asyncio.sleep(1.5 ** attempt)
+
+        if last_error is not None:
             if stop_event:
                 stop_event.set()
             results.append({
@@ -481,11 +491,10 @@ async def execute_on_db(
                 "db": db_name,
                 "status": "ERR",
                 "affected": 0,
-                "error": str(e),
+                "error": str(last_error),
                 "rows": None,
             })
-        finally:
-            progress.advance(task_id)
+        progress.advance(task_id)
 
 
 async def run_sql_on_all(
@@ -497,6 +506,7 @@ async def run_sql_on_all(
     use_transaction: bool = True,
     show_results: bool = False,
     stop_on_error: bool = False,
+    retry: int = 0,
 ) -> list[dict]:
     """Send SQL to the selected databases in parallel."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -554,6 +564,7 @@ async def run_sql_on_all(
                 use_transaction=use_transaction,
                 show_results=show_results,
                 stop_event=stop_event,
+                retry=retry,
             )
         )
 
@@ -855,6 +866,13 @@ def main() -> None:
         help="Stop execution on first failure",
     )
     parser.add_argument(
+        "--retry",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Retry failed databases N times with exponential backoff",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -943,6 +961,7 @@ def main() -> None:
             use_transaction=not args.no_transaction,
             show_results=args.show_results,
             stop_on_error=args.stop_on_error,
+            retry=args.retry,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation interrupted.[/]")
