@@ -810,6 +810,11 @@ def main() -> None:
         help="Regex filter for database names (applied before showing the list)",
     )
     parser.add_argument(
+        "--server",
+        metavar="REGEX",
+        help="Filter connections by name/alias using a regex",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -832,6 +837,13 @@ def main() -> None:
     # 1. Load connections
     connections = load_connections(args.connections)
     console.print(f"[green]✓[/] {len(connections)} server connection(s) loaded.")
+
+    if args.server:
+        connections = [c for c in connections if re.search(args.server, c["name"], re.IGNORECASE)]
+        if not connections:
+            console.print(f"[red]Error:[/] --server filter '{args.server}' matched no connections.")
+            sys.exit(1)
+        console.print(f"[dim]--server filter: {len(connections)} connection(s) matched.[/]")
 
     # 2. Get SQL
     if args.sql:
