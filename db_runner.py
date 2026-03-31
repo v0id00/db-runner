@@ -15,6 +15,7 @@ import io
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -65,7 +66,6 @@ def check_destructive(sql: str, force: bool = False) -> None:
     Show a warning if SQL contains destructive keywords and prompt for confirmation.
     If `force=True`, confirmation is skipped.
     """
-    import re
     found = [
         kw.replace(r"\b", "").replace(r"\s+", " ")
         for kw in DESTRUCTIVE_KEYWORDS
@@ -297,7 +297,25 @@ async def fetch_all_databases(connections: list[dict]) -> dict[str, list[str]]:
 # 4. Database selection (filtering via vim)
 # ---------------------------------------------------------------------------
 
-def select_databases(db_map: dict[str, list[str]]) -> list[tuple[str, str]]:
+def parse_server_db_line(line: str) -> Optional[tuple[str, str]]:
+    """Parse a 'server_name.db_name' line; handles server names containing dots."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    dot = line.rfind(".")
+    if dot < 1:
+        return None
+    server_name = line[:dot].strip()
+    db_name = line[dot + 1:].strip()
+    if server_name and db_name:
+        return server_name, db_name
+    return None
+
+
+def select_databases(
+    db_map: dict[str, list[str]],
+    dbfilter: Optional[str] = None,
+) -> list[tuple[str, str]]:
     """
     Display all DBs in vim; the user deletes lines they don't want to target.
     Returns a list of (server_name, db_name) pairs.
@@ -305,17 +323,35 @@ def select_databases(db_map: dict[str, list[str]]) -> list[tuple[str, str]]:
     all_entries = []
     for server_name, dbs in db_map.items():
         for db in sorted(dbs):
-            all_entries.append(f"{server_name}:{db}")
+            all_entries.append(f"{server_name}.{db}")
 
     if not all_entries:
         console.print("[red]No databases found, exiting.[/]")
         sys.exit(0)
 
+    # Apply dbfilter
+    if dbfilter:
+        try:
+            pattern = re.compile(dbfilter, re.IGNORECASE)
+        except re.error as e:
+            console.print(f"[red]Error:[/] --dbfilter regex is invalid: {e}")
+            sys.exit(1)
+        filtered_entries = [e for e in all_entries if pattern.search(e.split(".", 1)[-1] if "." in e else e)]
+        filtered_out = len(all_entries) - len(filtered_entries)
+        if filtered_out:
+            console.print(f"[dim]--dbfilter '{dbfilter}': {filtered_out} database(s) filtered out.[/]")
+        all_entries = filtered_entries
+
+    if not all_entries:
+        console.print("[red]No databases match the filter, exiting.[/]")
+        sys.exit(0)
+
+    filter_note = f"\n# --dbfilter '{dbfilter}' is active\n" if dbfilter else ""
     comment = (
         "# ──────────────────────────────────────────────────────────────\n"
         "# DELETE lines you do NOT want to target, or prefix them with #\n"
-        "# Line format: server_name:database_name\n"
-        "# To select all, just save: :wq\n"
+        "# Line format: server_name.database_name\n"
+        f"# To select all, just save: :wq{filter_note}"
         "# ──────────────────────────────────────────────────────────────\n\n"
     )
 
@@ -329,15 +365,9 @@ def select_databases(db_map: dict[str, list[str]]) -> list[tuple[str, str]]:
 
     selected: list[tuple[str, str]] = []
     for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if ":" not in line:
-            continue
-        server_name, db_name = line.split(":", 1)
-        server_name, db_name = server_name.strip(), db_name.strip()
-        if server_name and db_name:
-            selected.append((server_name, db_name))
+        parsed = parse_server_db_line(line)
+        if parsed:
+            selected.append(parsed)
 
     return selected
 
@@ -775,6 +805,11 @@ def main() -> None:
         help="Show rows returned by SELECT queries in the log",
     )
     parser.add_argument(
+        "--dbfilter",
+        metavar="REGEX",
+        help="Regex filter for database names (applied before showing the list)",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -831,7 +866,7 @@ def main() -> None:
         sys.exit(1)
 
     # 4. Filter database list
-    selected = select_databases(db_map)
+    selected = select_databases(db_map, dbfilter=args.dbfilter)
 
     if not selected:
         console.print("[yellow]No databases selected, exiting.[/]")
