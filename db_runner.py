@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-db-runner: MySQL/MariaDB veritabanlarına toplu SQL gönderme aracı
+db-runner: Bulk SQL execution tool for MySQL/MariaDB databases
 
-Kullanım:
-  db-runner                          # vim ile SQL gir
-  db-runner -c /path/to/servers.json # farklı config dosyası
-  db-runner --sql query.sql          # SQL'i dosyadan oku
-  db-runner --help                   # tüm seçenekler
+Usage:
+  db-runner                          # enter SQL via vim
+  db-runner -c /path/to/servers.json # use a different config file
+  db-runner --sql query.sql          # read SQL from file
+  db-runner --help                   # all options
 """
 
 import argparse
@@ -26,7 +26,7 @@ from typing import Optional
 try:
     import aiomysql
 except ImportError:
-    print("Hata: aiomysql modülü gerekli. Kurmak için: pip install aiomysql", file=sys.stderr)
+    print("Error: aiomysql module is required. Install with: pip install aiomysql", file=sys.stderr)
     sys.exit(1)
 
 from rich.console import Console
@@ -62,8 +62,8 @@ DESTRUCTIVE_KEYWORDS = (
 
 def check_destructive(sql: str, force: bool = False) -> None:
     """
-    SQL tehlikeli keyword içeriyorsa uyarı göster, onay iste.
-    `force=True` ise onay atlanır.
+    Show a warning if SQL contains destructive keywords and prompt for confirmation.
+    If `force=True`, confirmation is skipped.
     """
     import re
     found = [
@@ -76,54 +76,54 @@ def check_destructive(sql: str, force: bool = False) -> None:
 
     console.print()
     console.print(Panel(
-        "[bold red]⚠ Tehlikeli SQL tespit edildi![/]\n\n"
-        f"Bulunan anahtar kelimeler: [red]{', '.join(found)}[/]\n\n"
-        "[dim]Devam etmek için onaylayın, iptal için Ctrl+C[/]",
+        "[bold red]⚠ Destructive SQL detected![/]\n\n"
+        f"Detected keywords: [red]{', '.join(found)}[/]\n\n"
+        "[dim]Confirm to continue, Ctrl+C to cancel[/]",
         border_style="red",
-        title="[bold red]Uyarı[/]",
+        title="[bold red]Warning[/]",
     ))
 
     if force:
-        console.print("[yellow]--force ile onay atlandı.[/]")
+        console.print("[yellow]Confirmation skipped via --force.[/]")
         return
 
-    console.print("[bold]Devam etmek için [red]EVET[/] yazın:[/] ", end="")
+    console.print("[bold]Type [red]YES[/] to continue:[/] ", end="")
     try:
         answer = input()
     except (EOFError, KeyboardInterrupt):
-        console.print("\n[yellow]İptal edildi.[/]")
+        console.print("\n[yellow]Cancelled.[/]")
         sys.exit(0)
 
-    if answer.strip().upper() != "EVET":
-        console.print("[yellow]İptal edildi.[/]")
+    if answer.strip().upper() != "YES":
+        console.print("[yellow]Cancelled.[/]")
         sys.exit(0)
 
 
 # ---------------------------------------------------------------------------
-# 1. Bağlantı konfigürasyonu
+# 1. Connection configuration
 # ---------------------------------------------------------------------------
 
 def load_connections(path: str) -> list[dict]:
-    """connections.json dosyasını yükle ve doğrula."""
+    """Load and validate connections.json."""
     try:
         with open(path) as f:
             conns = json.load(f)
     except FileNotFoundError:
-        console.print(f"[red]Hata:[/] '{path}' bulunamadı.")
+        console.print(f"[red]Error:[/] '{path}' not found.")
         sys.exit(1)
     except json.JSONDecodeError as e:
-        console.print(f"[red]JSON parse hatası:[/] {e}")
+        console.print(f"[red]JSON parse error:[/] {e}")
         sys.exit(1)
 
     if not isinstance(conns, list) or len(conns) == 0:
-        console.print("[red]Hata:[/] connections.json boş veya liste formatında değil.")
+        console.print("[red]Error:[/] connections.json is empty or not a list.")
         sys.exit(1)
 
     required = {"host", "user", "password"}
     for i, conn in enumerate(conns):
         missing = required - conn.keys()
         if missing:
-            console.print(f"[red]Hata:[/] Bağlantı #{i} eksik alanlar: {', '.join(missing)}")
+            console.print(f"[red]Error:[/] Connection #{i} missing fields: {', '.join(missing)}")
             sys.exit(1)
         conn.setdefault("port", 3306)
         conn.setdefault("name", conn["host"])
@@ -133,16 +133,16 @@ def load_connections(path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 2. SQL geçmişi
+# 2. SQL history
 # ---------------------------------------------------------------------------
 
 HISTORY_FILE = os.path.expanduser("~/.db_runner_history")
-HISTORY_MAX  = 100   # saklanacak maksimum giriş sayısı
-HISTORY_SHOW = 10    # vim'de önizlemede gösterilecek son N giriş
+HISTORY_MAX  = 100   # maximum number of entries to store
+HISTORY_SHOW = 10    # last N entries shown in vim preview
 
 
 def history_load() -> list[dict]:
-    """~/.db_runner_history dosyasını JSON satırları olarak oku."""
+    """Read ~/.db_runner_history as JSON lines."""
     if not os.path.exists(HISTORY_FILE):
         return []
     entries = []
@@ -161,7 +161,7 @@ def history_load() -> list[dict]:
 
 
 def history_save(sql: str) -> None:
-    """SQL'i geçmiş dosyasına ekle, HISTORY_MAX aşılırsa eskiyi sil."""
+    """Append SQL to the history file, dropping oldest entries when HISTORY_MAX is exceeded."""
     entry = {"ts": datetime.now().isoformat(timespec="seconds"), "sql": sql}
     entries = history_load()
     entries.append(entry)
@@ -171,16 +171,16 @@ def history_save(sql: str) -> None:
             for e in entries:
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
     except OSError as exc:
-        console.print(f"[yellow]Uyarı: geçmiş kaydedilemedi:[/] {exc}")
+        console.print(f"[yellow]Warning: history could not be saved:[/] {exc}")
 
 
 def history_comment_block() -> str:
-    """Son HISTORY_SHOW girişi vim şablonunun üstüne yorum olarak ekle."""
+    """Prepend the last HISTORY_SHOW entries as comments to the vim template."""
     entries = history_load()
     if not entries:
         return ""
-    recent = entries[-HISTORY_SHOW:][::-1]  # en yeni üstte
-    lines = ["-- ──── Son sorgular (geçmiş) ────────────────────────────────"]
+    recent = entries[-HISTORY_SHOW:][::-1]  # newest first
+    lines = ["-- ──── Recent queries (history) ──────────────────────────────"]
     for e in recent:
         ts = e.get("ts", "")
         for i, sql_line in enumerate(e["sql"].splitlines()):
@@ -192,13 +192,13 @@ def history_comment_block() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3. Vim entegrasyonu
+# 3. Vim integration
 # ---------------------------------------------------------------------------
 
 def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
     """
-    Geçici dosyayı vim ile aç. Kaydedilen içeriği döndür.
-    Vim'den çıkış kodu sıfır değilse (ya da içerik değişmediyse) boş string döner.
+    Open a temporary file in vim and return the saved content.
+    Returns an empty string if vim exits with a non-zero code or content is unchanged.
     """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=suffix, delete=False, prefix="db_runner_"
@@ -222,15 +222,15 @@ def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
 
 
 def get_sql_from_vim() -> str:
-    """Kullanıcıdan vim aracılığıyla SQL girdisi al (geçmişi şablona ekle)."""
-    console.print("\n[bold cyan]► Vim açılıyor[/] — SQL'i yazın, kaydedin ve çıkın [dim](:wq)[/]\n")
+    """Get SQL input from the user via vim (appending history to the template)."""
+    console.print("\n[bold cyan]► Opening vim[/] — write your SQL, save and quit [dim](:wq)[/]\n")
 
     history_block = history_comment_block()
     template = (
         history_block
-        + "-- SQL'i buraya yazın\n"
-        + "-- Birden fazla ifade için noktalı virgül (;) kullanın\n"
-        + "-- Hazır olunca: :wq\n\n"
+        + "-- Write your SQL here\n"
+        + "-- Use semicolons (;) for multiple statements\n"
+        + "-- When ready: :wq\n\n"
     )
     content = open_vim(template, suffix=".sql")
 
@@ -241,18 +241,18 @@ def get_sql_from_vim() -> str:
     sql = "\n".join(sql_lines).strip()
 
     if not sql:
-        console.print("[yellow]SQL boş, çıkılıyor.[/]")
+        console.print("[yellow]SQL is empty, exiting.[/]")
         sys.exit(0)
 
     return sql
 
 
 # ---------------------------------------------------------------------------
-# 3. Veritabanı listelerini çekme
+# 3. Fetching database lists
 # ---------------------------------------------------------------------------
 
 async def fetch_databases_for(conn: dict) -> tuple[str, list[str], Optional[str]]:
-    """Tek bir sunucudan veritabanı listesi çek."""
+    """Fetch the database list from a single server."""
     name = conn["name"]
     try:
         connection = await aiomysql.connect(
@@ -275,8 +275,8 @@ async def fetch_databases_for(conn: dict) -> tuple[str, list[str], Optional[str]
 
 
 async def fetch_all_databases(connections: list[dict]) -> dict[str, list[str]]:
-    """Tüm sunuculardan eşzamanlı olarak veritabanı listesi çek."""
-    console.print("\n[bold]Veritabanı listeleri çekiliyor...[/]")
+    """Fetch database lists from all servers concurrently."""
+    console.print("\n[bold]Fetching database lists...[/]")
 
     tasks = [fetch_databases_for(conn) for conn in connections]
     results = await asyncio.gather(*tasks)
@@ -286,7 +286,7 @@ async def fetch_all_databases(connections: list[dict]) -> dict[str, list[str]]:
         if error:
             console.print(f"  [red]✗ {name}:[/] {error}")
         else:
-            console.print(f"  [green]✓ {name}:[/] {len(dbs)} veritabanı")
+            console.print(f"  [green]✓ {name}:[/] {len(dbs)} database(s)")
             if dbs:
                 db_map[name] = dbs
 
@@ -294,13 +294,13 @@ async def fetch_all_databases(connections: list[dict]) -> dict[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# 4. Veritabanı seçimi (vim ile filtreleme)
+# 4. Database selection (filtering via vim)
 # ---------------------------------------------------------------------------
 
 def select_databases(db_map: dict[str, list[str]]) -> list[tuple[str, str]]:
     """
-    Tüm DB'leri vim'de göster, kullanıcı göndermek istemediklerini siler.
-    (sunucu_adi, db_adi) çiftlerinin listesini döndür.
+    Display all DBs in vim; the user deletes lines they don't want to target.
+    Returns a list of (server_name, db_name) pairs.
     """
     all_entries = []
     for server_name, dbs in db_map.items():
@@ -308,21 +308,21 @@ def select_databases(db_map: dict[str, list[str]]) -> list[tuple[str, str]]:
             all_entries.append(f"{server_name}:{db}")
 
     if not all_entries:
-        console.print("[red]Hiç veritabanı bulunamadı, çıkılıyor.[/]")
+        console.print("[red]No databases found, exiting.[/]")
         sys.exit(0)
 
     comment = (
         "# ──────────────────────────────────────────────────────────────\n"
-        "# Göndermek İSTEMEDİĞİNİZ satırları silin veya # ile başlatın\n"
-        "# Satır formatı: sunucu_adi:veritabani_adi\n"
-        "# Tümünü seçmek için doğrudan kaydedin: :wq\n"
+        "# DELETE lines you do NOT want to target, or prefix them with #\n"
+        "# Line format: server_name:database_name\n"
+        "# To select all, just save: :wq\n"
         "# ──────────────────────────────────────────────────────────────\n\n"
     )
 
     total = len(all_entries)
     console.print(
-        f"\n[bold cyan]► Vim açılıyor[/] — [bold]{total}[/] veritabanı listelendi. "
-        "Göndermek istemediklerinizi silin.\n"
+        f"\n[bold cyan]► Opening vim[/] — [bold]{total}[/] database(s) listed. "
+        "Delete the ones you don't want to target.\n"
     )
 
     content = open_vim("\n".join(all_entries) + "\n", suffix=".txt", comment=comment)
@@ -343,11 +343,11 @@ def select_databases(db_map: dict[str, list[str]]) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# 5-6. Paralel SQL çalıştırma + progress bar
+# 5-6. Parallel SQL execution + progress bar
 # ---------------------------------------------------------------------------
 
-def wait_for_keypress(prompt: str = "\n[dim]Devam etmek için bir tuşa basın...[/]") -> None:
-    """Terminalde tek tuş bekle (echo yok)."""
+def wait_for_keypress(prompt: str = "\n[dim]Press any key to continue...[/]") -> None:
+    """Wait for a single keypress in the terminal (no echo)."""
     console.print(prompt, end="")
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -372,7 +372,7 @@ async def execute_on_db(
     use_transaction: bool = True,
     show_results: bool = False,
 ) -> None:
-    """Bir veritabanında SQL çalıştır (semaphore ile hız sınırlaması)."""
+    """Execute SQL on one database (rate-limited by semaphore)."""
     server_name = conn["name"]
     async with semaphore:
         if dry_run:
@@ -445,7 +445,7 @@ async def run_sql_on_all(
     use_transaction: bool = True,
     show_results: bool = False,
 ) -> list[dict]:
-    """Seçili veritabanlarına paralel SQL gönder."""
+    """Send SQL to the selected databases in parallel."""
     conn_map = {conn["name"]: conn for conn in connections}
 
     semaphores: dict[str, asyncio.Semaphore] = {
@@ -471,7 +471,7 @@ async def run_sql_on_all(
     )
     dry_label = " [yellow](DRY RUN)[/]" if dry_run else ""
     progress.start()
-    task_id = progress.add_task(f"[cyan]SQL gönderiliyor...{dry_label}", total=len(selected))
+    task_id = progress.add_task(f"[cyan]Sending SQL...{dry_label}", total=len(selected))
 
     tasks = []
     for server_name, db_name in selected:
@@ -481,7 +481,7 @@ async def run_sql_on_all(
                 "db": db_name,
                 "status": "ERR",
                 "affected": 0,
-                "error": f"Sunucu tanımsız: {server_name}",
+                "error": f"Server not defined: {server_name}",
             })
             progress.advance(task_id)
             continue
@@ -509,10 +509,10 @@ async def run_sql_on_all(
     err = len(results) - ok - dry_count
     if dry_run:
         status_color = "yellow"
-        done_label = f"[yellow]DRY RUN — {dry_count} veritabanı hedeflendi[/]"
+        done_label = f"[yellow]DRY RUN — {dry_count} database(s) targeted[/]"
     else:
         status_color = "green" if err == 0 else "yellow" if ok > 0 else "red"
-        done_label = f"[{status_color}]✓ Tamamlandı[/]  [green]{ok} başarılı[/]  [red]{err} hatalı[/]"
+        done_label = f"[{status_color}]✓ Done[/]  [green]{ok} successful[/]  [red]{err} failed[/]"
     progress.update(task_id, description=done_label)
     progress.stop()
 
@@ -522,7 +522,7 @@ async def run_sql_on_all(
 
 
 # ---------------------------------------------------------------------------
-# 7. Log görüntüleme
+# 7. Log display
 # ---------------------------------------------------------------------------
 
 def format_results(
@@ -532,7 +532,7 @@ def format_results(
     dry_run: bool,
     timestamp: str,
 ) -> str:
-    """Sonuçları istenen formatta string'e dönüştür."""
+    """Render results to a string in the requested format."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
     ok_count  = sum(1 for r in results if r["status"] == "OK")
     err_count = sum(1 for r in results if r["status"] == "ERR")
@@ -556,19 +556,19 @@ def format_results(
             writer.writerow([timestamp, r["server"], r["db"], r["status"], r["affected"], r["error"] or ""])
         return buf.getvalue()
 
-    # plain (varsayılan)
+    # plain (default)
     dry_tag = "  [DRY RUN]" if dry_run else ""
     lines = [
         f"# db-runner Log — {timestamp}{dry_tag}",
-        f"# Toplam: {len(results)}  Başarılı: {ok_count}  Hatalı: {err_count}"
+        f"# Total: {len(results)}  Successful: {ok_count}  Failed: {err_count}"
         + (f"  DryRun: {dry_count}" if dry_run else ""),
         "#",
-        "# Çalıştırılan SQL:",
+        "# Executed SQL:",
         *[f"#   {line}" for line in sql.splitlines()],
         "#",
         "# ─────────────────────────────────────────────────────────────",
-        "# Kaydetmek için:  :w /tam/yol/dosya.log",
-        "# Çıkmak için:     :q",
+        "# To save:  :w /full/path/file.log",
+        "# To quit:  :q",
         "# ─────────────────────────────────────────────────────────────",
         "",
     ]
@@ -594,43 +594,43 @@ def show_log(
     log_format: str = "plain",
     failed_output: Optional[str] = None,
 ) -> None:
-    """Sonuçları özet panelde ve vim'de göster; isteğe bağlı dosyaya kaydet."""
+    """Display results in a summary panel and in vim; optionally save to file."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
     ok_count  = sum(1 for r in results if r["status"] == "OK")
     err_count = sum(1 for r in results if r["status"] == "ERR")
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Terminale özet
+    # Print summary to terminal
     if dry_run:
         summary_color = "yellow"
-        summary_text = f"[yellow]DRY RUN[/]  {dry_count} veritabanı hedeflenirdi"
+        summary_text = f"[yellow]DRY RUN[/]  {dry_count} database(s) would be targeted"
     else:
         summary_color = "green" if err_count == 0 else "yellow" if ok_count > 0 else "red"
         summary_text = (
-            f"[green]Başarılı:[/] {ok_count}   [red]Hatalı:[/] {err_count}   "
-            f"[dim]Toplam: {len(results)}[/]"
+            f"[green]Successful:[/] {ok_count}   [red]Failed:[/] {err_count}   "
+            f"[dim]Total: {len(results)}[/]"
         )
     console.print()
     console.print(Panel(
         summary_text,
-        title="[bold]Sonuç Özeti[/]",
+        title="[bold]Result Summary[/]",
         border_style=summary_color,
     ))
 
-    # Hatalı DB'leri ayrı dosyaya kaydet
+    # Save failed DBs to a separate file
     failed_results = [r for r in results if r["status"] == "ERR"]
     if failed_output and failed_results:
         try:
             with open(failed_output, "w") as f:
                 for r in failed_results:
                     f.write(f"{r['server']}:{r['db']}\n")
-            console.print(f"[yellow]⚠[/] {len(failed_results)} hatalı DB '{failed_output}' dosyasına kaydedildi.")
+            console.print(f"[yellow]⚠[/] {len(failed_results)} failed DB(s) written to '{failed_output}'.")
         except OSError as exc:
-            console.print(f"[red]Hata: failed-output yazılamadı:[/] {exc}")
+            console.print(f"[red]Error: could not write failed-output:[/] {exc}")
 
     log_content = format_results(results, sql, "plain", dry_run, timestamp)
 
-    console.print("\n[bold cyan]► Vim açılıyor[/] — log görüntüleniyor [dim](:w dosya.log ile kaydet, :q ile çık)[/]\n")
+    console.print("\n[bold cyan]► Opening vim[/] — viewing log [dim](:w file.log to save, :q to quit)[/]\n")
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".log", delete=False, prefix="db_runner_log_"
@@ -648,72 +648,72 @@ def show_log(
 
 
 # ---------------------------------------------------------------------------
-# Giriş noktası
+# Entry point
 # ---------------------------------------------------------------------------
 
-HELP_TEXT = """[bold cyan]db-runner[/] — MySQL/MariaDB veritabanlarına toplu SQL gönderme aracı
+HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/MariaDB databases
 
-[bold]KULLANIM[/]
-  [cyan]db-runner[/] [seçenekler]
+[bold]USAGE[/]
+  [cyan]db-runner[/] [options]
 
-[bold]SEÇENEKLER[/]
-  [green]-c, --connections[/] [dim]DOSYA[/]   Bağlantı konfigürasyonu (varsayılan: [dim]connections.json[/])
-  [green]--sql[/] [dim]DOSYA[/]               SQL'i dosyadan oku (verilmezse vim açılır)
-  [green]--dry-run[/]                  SQL çalıştırmadan hedef DB'leri göster
-  [green]--force[/]                    Destructive SQL onayını atla
-  [green]--timeout[/] [dim]SANİYE[/]          Sorgu timeout süresi (varsayılan: [dim]30[/])
-  [green]--no-transaction[/]           Autocommit modunda çalış (transaction olmadan)
-  [green]--log-format[/] [dim]FORMAT[/]       Log formatı: [dim]plain[/] (varsayılan) [dim]| json | csv[/]
-  [green]--failed-output[/] [dim]DOSYA[/]     Hatalı DB'leri [dim]sunucu:db[/] formatında kaydet
-  [green]--show-results[/]             SELECT sonuçlarını logda göster
-  [green]-h, --help[/]                 Bu yardım sayfasını göster
+[bold]OPTIONS[/]
+  [green]-c, --connections[/] [dim]FILE[/]    Connection configuration file (default: [dim]connections.json[/])
+  [green]--sql[/] [dim]FILE[/]                Read SQL from file (opens vim if omitted)
+  [green]--dry-run[/]                   Show target DBs without executing SQL
+  [green]--force[/]                     Skip confirmation for destructive SQL
+  [green]--timeout[/] [dim]SECONDS[/]         Query timeout in seconds (default: [dim]30[/])
+  [green]--no-transaction[/]            Run in autocommit mode (no transaction)
+  [green]--log-format[/] [dim]FORMAT[/]        Log format: [dim]plain[/] (default) [dim]| json | csv[/]
+  [green]--failed-output[/] [dim]FILE[/]      Save failed DBs in [dim]server:db[/] format to this file
+  [green]--show-results[/]              Show SELECT result rows in the log
+  [green]-h, --help[/]                  Show this help page
 
-[bold]ÖRNEKLER[/]
-  [dim]# Standart kullanım — vim ile SQL gir, DB listesini filtrele[/]
+[bold]EXAMPLES[/]
+  [dim]# Standard usage — enter SQL via vim, filter the DB list[/]
   [cyan]db-runner[/]
 
-  [dim]# SQL dosyadan oku[/]
+  [dim]# Read SQL from file[/]
   [cyan]db-runner[/] --sql update.sql
 
-  [dim]# Hangi DB'lerin etkileneceğini önizle (çalıştırmaz)[/]
+  [dim]# Preview which DBs would be affected (does not execute)[/]
   [cyan]db-runner[/] --dry-run --sql fix.sql
 
-  [dim]# DELETE içeren sorguyu onaysız gönder, timeout 60s[/]
+  [dim]# Send a DELETE query without confirmation, 60s timeout[/]
   [cyan]db-runner[/] --sql cleanup.sql --force --timeout 60
 
-  [dim]# SELECT sonuçlarını JSON loguna kaydet[/]
+  [dim]# Save SELECT results to a JSON log[/]
   [cyan]db-runner[/] --sql report.sql --show-results --log-format json
 
-  [dim]# Farklı sunucu konfigürasyonu, hataları ayrı dosyaya yaz[/]
+  [dim]# Different server config, write failures to a separate file[/]
   [cyan]db-runner[/] -c /etc/servers.json --failed-output retry.txt
 
-[bold]AKIŞ[/]
-  [dim]1.[/] [cyan]connections.json[/] okunur (cp connections.example.json connections.json)
-  [dim]2.[/] vim açılır → SQL yazılır [dim](:wq)[/]  [dim]Son sorgular yorum satırı olarak görünür[/]
-  [dim]3.[/] Sunuculardan DB listeleri çekilir [dim](SHOW DATABASES)[/]
-  [dim]4.[/] vim açılır → [cyan]sunucu:db[/] listesi, silmek istenenler kaldırılır
-  [dim]5.[/] SQL paralel olarak gönderilir (per-sunucu Semaphore)[/]
-  [dim]6.[/] Progress bar + ETA gösterilir, bittikten sonra tuş beklenir
-  [dim]7.[/] vim log buffer açılır → [dim]:w dosya.log[/] ile kaydedilebilir
+[bold]WORKFLOW[/]
+  [dim]1.[/] [cyan]connections.json[/] is read (cp connections.example.json connections.json)
+  [dim]2.[/] vim opens → write SQL [dim](:wq)[/]  [dim]Recent queries appear as comment lines[/]
+  [dim]3.[/] DB lists are fetched from servers [dim](SHOW DATABASES)[/]
+  [dim]4.[/] vim opens → [cyan]server:db[/] list, delete lines you don't want
+  [dim]5.[/] SQL is sent in parallel (per-server Semaphore)[/]
+  [dim]6.[/] Progress bar + ETA shown, waits for a keypress when done
+  [dim]7.[/] vim log buffer opens → save with [dim]:w file.log[/]
 
-[bold]KONFİGÜRASYON[/]
-  [cyan]connections.json[/] formatı:
+[bold]CONFIGURATION[/]
+  [cyan]connections.json[/] format:
   [dim]{
-    "name": "prod-1",        ← görünen isim (opsiyonel, varsayılan: host)
+    "name": "prod-1",        ← display name (optional, default: host)
     "host": "db.example.com",
-    "port": 3306,            ← opsiyonel, varsayılan: 3306
+    "port": 3306,            ← optional, default: 3306
     "user": "myuser",
     "password": "mypass",
-    "max_connections": 3     ← opsiyonel, varsayılan: 3
+    "max_connections": 3     ← optional, default: 3
   }[/]
 
-[bold]GEÇMİŞ[/]
-  Her çalıştırılan SQL [cyan]~/.db_runner_history[/] dosyasına kaydedilir (son 100 sorgu).
+[bold]HISTORY[/]
+  Every executed SQL is saved to [cyan]~/.db_runner_history[/] (last 100 queries).
 """
 
 
 def print_help() -> None:
-    """Rich formatında yardım sayfasını göster."""
+    """Display the help page with rich formatting."""
     from rich.padding import Padding
     console.print(Padding(HELP_TEXT.strip(), (1, 2)))
 
@@ -721,63 +721,63 @@ def print_help() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="db-runner",
-        description="db-runner: MySQL/MariaDB için toplu SQL gönderme aracı",
+        description="db-runner: Bulk SQL execution tool for MySQL/MariaDB",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
     )
     parser.add_argument(
         "-c", "--connections",
         default="connections.json",
-        metavar="DOSYA",
-        help="Bağlantı konfigürasyon dosyası (varsayılan: connections.json)",
+        metavar="FILE",
+        help="Connection configuration file (default: connections.json)",
     )
     parser.add_argument(
         "--sql",
-        metavar="DOSYA",
-        help="SQL'i dosyadan oku (belirtilmezse vim açılır)",
+        metavar="FILE",
+        help="Read SQL from file (opens vim if not specified)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="SQL çalıştırmadan hedef veritabanlarını göster",
+        help="Show target databases without executing SQL",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Destructive SQL (DROP/TRUNCATE/DELETE/ALTER TABLE) onayını atla",
+        help="Skip confirmation for destructive SQL (DROP/TRUNCATE/DELETE/ALTER TABLE)",
     )
     parser.add_argument(
         "--timeout",
         type=int,
         default=30,
-        metavar="SANİYE",
-        help="Sorgu timeout süresi saniye cinsinden (varsayılan: 30)",
+        metavar="SECONDS",
+        help="Query timeout in seconds (default: 30)",
     )
     parser.add_argument(
         "--no-transaction",
         action="store_true",
-        help="Transaction kullanma, autocommit modunda çalış",
+        help="Run in autocommit mode (no transaction)",
     )
     parser.add_argument(
         "--log-format",
         choices=["plain", "json", "csv"],
         default="plain",
-        help="Log kayıt formatı: plain (varsayılan), json, csv",
+        help="Log output format: plain (default), json, csv",
     )
     parser.add_argument(
         "--failed-output",
-        metavar="DOSYA",
-        help="Hatalı DB'leri sunucu:db formatında bu dosyaya kaydet",
+        metavar="FILE",
+        help="Save failed DBs in server:db format to this file",
     )
     parser.add_argument(
         "--show-results",
         action="store_true",
-        help="SELECT sorgularının döndürdüğü satırları logda göster",
+        help="Show rows returned by SELECT queries in the log",
     )
     parser.add_argument(
         "-h", "--help",
         action="store_true",
-        help="Bu yardım sayfasını göster",
+        help="Show this help page",
     )
     args = parser.parse_args()
 
@@ -789,57 +789,57 @@ def main() -> None:
 
     header_extra = "  [yellow bold][DRY RUN][/]" if dry_run else ""
     console.print(Panel(
-        f"[bold cyan]db-runner[/]  —  MySQL/MariaDB Toplu SQL Aracı{header_extra}\n"
-        "[dim]Çıkmak için istediğiniz zaman Ctrl+C kullanabilirsiniz[/]",
+        f"[bold cyan]db-runner[/]  —  MySQL/MariaDB Bulk SQL Tool{header_extra}\n"
+        "[dim]You can press Ctrl+C at any time to exit[/]",
         border_style="cyan",
     ))
 
-    # 1. Bağlantıları yükle
+    # 1. Load connections
     connections = load_connections(args.connections)
-    console.print(f"[green]✓[/] {len(connections)} sunucu bağlantısı yüklendi.")
+    console.print(f"[green]✓[/] {len(connections)} server connection(s) loaded.")
 
-    # 2. SQL al
+    # 2. Get SQL
     if args.sql:
         try:
             with open(args.sql) as f:
                 sql = f.read().strip()
         except FileNotFoundError:
-            console.print(f"[red]Hata:[/] SQL dosyası bulunamadı: {args.sql}")
+            console.print(f"[red]Error:[/] SQL file not found: {args.sql}")
             sys.exit(1)
         if not sql:
-            console.print("[red]Hata:[/] SQL dosyası boş.")
+            console.print("[red]Error:[/] SQL file is empty.")
             sys.exit(1)
-        console.print(f"[green]✓[/] SQL dosyadan okundu: {args.sql}")
+        console.print(f"[green]✓[/] SQL read from file: {args.sql}")
     else:
         sql = get_sql_from_vim()
-        console.print(f"[green]✓[/] SQL alındı ({len(sql.splitlines())} satır).")
+        console.print(f"[green]✓[/] SQL received ({len(sql.splitlines())} line(s)).")
 
     history_save(sql)
 
-    # 2b. Destructive keyword kontrolü
+    # 2b. Destructive keyword check
     check_destructive(sql, force=args.force)
 
-    # 3. Veritabanı listelerini çek
+    # 3. Fetch database lists
     try:
         db_map = asyncio.run(fetch_all_databases(connections))
     except KeyboardInterrupt:
-        console.print("\n[yellow]İptal edildi.[/]")
+        console.print("\n[yellow]Cancelled.[/]")
         sys.exit(0)
 
     if not db_map:
-        console.print("[red]Hiçbir sunucuya bağlanılamadı, çıkılıyor.[/]")
+        console.print("[red]Could not connect to any server, exiting.[/]")
         sys.exit(1)
 
-    # 4. Veritabanı listesini filtrele
+    # 4. Filter database list
     selected = select_databases(db_map)
 
     if not selected:
-        console.print("[yellow]Hiç veritabanı seçilmedi, çıkılıyor.[/]")
+        console.print("[yellow]No databases selected, exiting.[/]")
         sys.exit(0)
 
-    console.print(f"[green]✓[/] {len(selected)} veritabanı seçildi.\n")
+    console.print(f"[green]✓[/] {len(selected)} database(s) selected.\n")
 
-    # 5-6. Paralel SQL çalıştır + progress
+    # 5-6. Execute SQL in parallel + progress
     try:
         results = asyncio.run(run_sql_on_all(
             selected, connections, sql,
@@ -849,10 +849,10 @@ def main() -> None:
             show_results=args.show_results,
         ))
     except KeyboardInterrupt:
-        console.print("\n[yellow]İşlem kesildi.[/]")
+        console.print("\n[yellow]Operation interrupted.[/]")
         sys.exit(0)
 
-    # 7. Log göster
+    # 7. Show log
     show_log(results, sql, dry_run=dry_run, log_format=args.log_format, failed_output=args.failed_output)
 
 
