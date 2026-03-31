@@ -103,7 +103,26 @@ def check_destructive(sql: str, force: bool = False) -> None:
 # 1. Connection configuration
 # ---------------------------------------------------------------------------
 
-def load_connections(path: str) -> list[dict]:
+def load_vault(path: str) -> dict[str, str]:
+    """Load password vault from a key=value file."""
+    vault: dict[str, str] = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line and "=" in line:
+                    key, _, value = line.partition("=")
+                    vault[key.strip()] = value.strip()
+    except FileNotFoundError:
+        console.print(f"[red]Error:[/] vault file not found: {path}")
+        sys.exit(1)
+    except OSError as exc:
+        console.print(f"[red]Error:[/] could not read vault file: {exc}")
+        sys.exit(1)
+    return vault
+
+
+def load_connections(path: str, vault_path: Optional[str] = None) -> list[dict]:
     """Load and validate connections.json."""
     try:
         with open(path) as f:
@@ -129,6 +148,12 @@ def load_connections(path: str) -> list[dict]:
         conn.setdefault("name", conn["host"])
         conn.setdefault("max_connections", 3)
         conn.setdefault("tags", [])
+
+    if vault_path:
+        vault = load_vault(vault_path)
+        for conn in conns:
+            if conn["name"] in vault:
+                conn["password"] = vault[conn["name"]]
 
     return conns
 
@@ -976,6 +1001,11 @@ def main() -> None:
         help="Skip all vim steps (SQL from stdin if --sql not given, select all DBs, no log viewer)",
     )
     parser.add_argument(
+        "--vault",
+        metavar="FILE",
+        help="Key=value file to override connection passwords (format: connection_name=password)",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -996,7 +1026,7 @@ def main() -> None:
     ))
 
     # 1. Load connections
-    connections = load_connections(args.connections)
+    connections = load_connections(args.connections, vault_path=args.vault)
     console.print(f"[green]✓[/] {len(connections)} server connection(s) loaded.")
 
     if args.server:
