@@ -650,23 +650,85 @@ def show_log(
 # Giriş noktası
 # ---------------------------------------------------------------------------
 
+HELP_TEXT = """[bold cyan]db-runner[/] — MySQL/MariaDB veritabanlarına toplu SQL gönderme aracı
+
+[bold]KULLANIM[/]
+  [cyan]db-runner[/] [seçenekler]
+
+[bold]SEÇENEKLER[/]
+  [green]-c, --connections[/] [dim]DOSYA[/]   Bağlantı konfigürasyonu (varsayılan: [dim]connections.json[/])
+  [green]--sql[/] [dim]DOSYA[/]               SQL'i dosyadan oku (verilmezse vim açılır)
+  [green]--dry-run[/]                  SQL çalıştırmadan hedef DB'leri göster
+  [green]--force[/]                    Destructive SQL onayını atla
+  [green]--timeout[/] [dim]SANİYE[/]          Sorgu timeout süresi (varsayılan: [dim]30[/])
+  [green]--no-transaction[/]           Autocommit modunda çalış (transaction olmadan)
+  [green]--log-format[/] [dim]FORMAT[/]       Log formatı: [dim]plain[/] (varsayılan) [dim]| json | csv[/]
+  [green]--failed-output[/] [dim]DOSYA[/]     Hatalı DB'leri [dim]sunucu:db[/] formatında kaydet
+  [green]--show-results[/]             SELECT sonuçlarını logda göster
+  [green]-h, --help[/]                 Bu yardım sayfasını göster
+
+[bold]ÖRNEKLER[/]
+  [dim]# Standart kullanım — vim ile SQL gir, DB listesini filtrele[/]
+  [cyan]db-runner[/]
+
+  [dim]# SQL dosyadan oku[/]
+  [cyan]db-runner[/] --sql update.sql
+
+  [dim]# Hangi DB'lerin etkileneceğini önizle (çalıştırmaz)[/]
+  [cyan]db-runner[/] --dry-run --sql fix.sql
+
+  [dim]# DELETE içeren sorguyu onaysız gönder, timeout 60s[/]
+  [cyan]db-runner[/] --sql cleanup.sql --force --timeout 60
+
+  [dim]# SELECT sonuçlarını JSON loguna kaydet[/]
+  [cyan]db-runner[/] --sql report.sql --show-results --log-format json
+
+  [dim]# Farklı sunucu konfigürasyonu, hataları ayrı dosyaya yaz[/]
+  [cyan]db-runner[/] -c /etc/servers.json --failed-output retry.txt
+
+[bold]AKIŞ[/]
+  [dim]1.[/] [cyan]connections.json[/] okunur (cp connections.example.json connections.json)
+  [dim]2.[/] vim açılır → SQL yazılır [dim](:wq)[/]  [dim]Son sorgular yorum satırı olarak görünür[/]
+  [dim]3.[/] Sunuculardan DB listeleri çekilir [dim](SHOW DATABASES)[/]
+  [dim]4.[/] vim açılır → [cyan]sunucu:db[/] listesi, silmek istenenler kaldırılır
+  [dim]5.[/] SQL paralel olarak gönderilir (per-sunucu Semaphore)[/]
+  [dim]6.[/] Progress bar + ETA gösterilir, bittikten sonra tuş beklenir
+  [dim]7.[/] vim log buffer açılır → [dim]:w dosya.log[/] ile kaydedilebilir
+
+[bold]KONFİGÜRASYON[/]
+  [cyan]connections.json[/] formatı:
+  [dim]{
+    "name": "prod-1",        ← görünen isim (opsiyonel, varsayılan: host)
+    "host": "db.example.com",
+    "port": 3306,            ← opsiyonel, varsayılan: 3306
+    "user": "myuser",
+    "password": "mypass",
+    "max_connections": 3     ← opsiyonel, varsayılan: 3
+  }[/]
+
+[bold]GEÇMİŞ[/]
+  Her çalıştırılan SQL [cyan]~/.db_runner_history[/] dosyasına kaydedilir (son 100 sorgu).
+"""
+
+
+def print_help() -> None:
+    """Rich formatında yardım sayfasını göster."""
+    from rich.padding import Padding
+    console.print(Padding(HELP_TEXT.strip(), (1, 2)))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
+        prog="db-runner",
         description="db-runner: MySQL/MariaDB için toplu SQL gönderme aracı",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Örnekler:\n"
-            "  python db_runner.py\n"
-            "  python db_runner.py -c /etc/db_runner/connections.json\n"
-            "  python db_runner.py --sql update.sql\n"
-            "  python db_runner.py --dry-run\n"
-        ),
+        add_help=False,
     )
     parser.add_argument(
         "-c", "--connections",
         default="connections.json",
         metavar="DOSYA",
-        help="Bağlantı konfigürasyon dosyası (varsayılan: connections.json — örnek: connections.example.json)",
+        help="Bağlantı konfigürasyon dosyası (varsayılan: connections.json)",
     )
     parser.add_argument(
         "--sql",
@@ -711,7 +773,16 @@ def main() -> None:
         action="store_true",
         help="SELECT sorgularının döndürdüğü satırları logda göster",
     )
+    parser.add_argument(
+        "-h", "--help",
+        action="store_true",
+        help="Bu yardım sayfasını göster",
+    )
     args = parser.parse_args()
+
+    if args.help:
+        print_help()
+        sys.exit(0)
 
     dry_run: bool = args.dry_run
 
