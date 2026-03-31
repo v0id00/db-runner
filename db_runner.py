@@ -694,6 +694,7 @@ def show_log(
     failed_output: Optional[str] = None,
     sql_file_label: Optional[str] = None,
     quiet: bool = False,
+    output_file: Optional[str] = None,
 ) -> None:
     """Display results in a summary panel and in vim; optionally save to file."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
@@ -729,6 +730,15 @@ def show_log(
             console.print(f"[yellow]⚠[/] {len(failed_results)} failed DB(s) written to '{failed_output}'.")
         except OSError as exc:
             console.print(f"[red]Error: could not write failed-output:[/] {exc}")
+
+    # Save log to --output file if specified
+    if output_file:
+        try:
+            with open(output_file, "w") as f:
+                f.write(format_results(results, sql, log_format, dry_run, timestamp, sql_file_label=sql_file_label))
+            console.print(f"[green]✓[/] Log saved to {output_file}")
+        except OSError as exc:
+            console.print(f"[red]Error: could not write output file:[/] {exc}")
 
     if quiet:
         return
@@ -938,6 +948,11 @@ def main() -> None:
         help="Suppress progress bar, keypress wait, and vim log (for CI/cron use)",
     )
     parser.add_argument(
+        "--output",
+        metavar="FILE",
+        help="Save log to this file (format controlled by --log-format)",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -1054,6 +1069,7 @@ def main() -> None:
             failed_output=args.failed_output,
             sql_file_label=fname if multi_file else None,
             quiet=args.quiet,
+            output_file=args.output,
         )
 
 
