@@ -366,6 +366,7 @@ async def execute_on_db(
     results: list,
     dry_run: bool = False,
     timeout: int = 30,
+    use_transaction: bool = True,
 ) -> None:
     """Bir veritabanında SQL çalıştır (semaphore ile hız sınırlaması)."""
     server_name = conn["name"]
@@ -390,15 +391,15 @@ async def execute_on_db(
                 user=conn["user"],
                 password=conn["password"],
                 db=db_name,
-                connect_timeout=min(timeout, 10),
-                read_timeout=timeout,
-                write_timeout=timeout,
-                autocommit=True,
+                connect_timeout=timeout,
+                autocommit=not use_transaction,
             )
             try:
                 async with connection.cursor() as cursor:
-                    await cursor.execute(sql)
+                    await asyncio.wait_for(cursor.execute(sql), timeout=timeout)
                     affected = cursor.rowcount
+                    if use_transaction:
+                        await connection.commit()
                     results.append({
                         "server": server_name,
                         "db": db_name,
@@ -407,6 +408,10 @@ async def execute_on_db(
                         "error": None,
                         "rows": None,
                     })
+            except Exception:
+                if use_transaction:
+                    await connection.rollback()
+                raise
             finally:
                 connection.close()
         except Exception as e:
@@ -428,6 +433,7 @@ async def run_sql_on_all(
     sql: str,
     dry_run: bool = False,
     timeout: int = 30,
+    use_transaction: bool = True,
 ) -> list[dict]:
     """Seçili veritabanlarına paralel SQL gönder."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -481,6 +487,7 @@ async def run_sql_on_all(
                 results,
                 dry_run=dry_run,
                 timeout=timeout,
+                use_transaction=use_transaction,
             )
         )
 
@@ -620,6 +627,11 @@ def main() -> None:
         metavar="SANİYE",
         help="Sorgu timeout süresi saniye cinsinden (varsayılan: 30)",
     )
+    parser.add_argument(
+        "--no-transaction",
+        action="store_true",
+        help="Transaction kullanma, autocommit modunda çalış",
+    )
     args = parser.parse_args()
 
     dry_run: bool = args.dry_run
@@ -678,7 +690,12 @@ def main() -> None:
 
     # 5-6. Paralel SQL çalıştır + progress
     try:
-        results = asyncio.run(run_sql_on_all(selected, connections, sql, dry_run=dry_run, timeout=args.timeout))
+        results = asyncio.run(run_sql_on_all(
+            selected, connections, sql,
+            dry_run=dry_run,
+            timeout=args.timeout,
+            use_transaction=not args.no_transaction,
+        ))
     except KeyboardInterrupt:
         console.print("\n[yellow]İşlem kesildi.[/]")
         sys.exit(0)
