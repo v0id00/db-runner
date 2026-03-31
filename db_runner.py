@@ -369,6 +369,7 @@ async def execute_on_db(
     dry_run: bool = False,
     timeout: int = 30,
     use_transaction: bool = True,
+    show_results: bool = False,
 ) -> None:
     """Bir veritabanında SQL çalıştır (semaphore ile hız sınırlaması)."""
     server_name = conn["name"]
@@ -400,6 +401,11 @@ async def execute_on_db(
                 async with connection.cursor() as cursor:
                     await asyncio.wait_for(cursor.execute(sql), timeout=timeout)
                     affected = cursor.rowcount
+                    rows = None
+                    if show_results:
+                        rows = await cursor.fetchall()
+                        col_names = [d[0] for d in cursor.description] if cursor.description else []
+                        rows = {"columns": col_names, "data": [list(row) for row in rows]}
                     if use_transaction:
                         await connection.commit()
                     results.append({
@@ -408,7 +414,7 @@ async def execute_on_db(
                         "status": "OK",
                         "affected": affected,
                         "error": None,
-                        "rows": None,
+                        "rows": rows,
                     })
             except Exception:
                 if use_transaction:
@@ -436,6 +442,7 @@ async def run_sql_on_all(
     dry_run: bool = False,
     timeout: int = 30,
     use_transaction: bool = True,
+    show_results: bool = False,
 ) -> list[dict]:
     """Seçili veritabanlarına paralel SQL gönder."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -490,6 +497,7 @@ async def run_sql_on_all(
                 dry_run=dry_run,
                 timeout=timeout,
                 use_transaction=use_transaction,
+                show_results=show_results,
             )
         )
 
@@ -535,10 +543,7 @@ def format_results(
             "dry_run": dry_run,
             "sql": sql,
             "summary": {"total": len(results), "ok": ok_count, "err": err_count, "dry": dry_count},
-            "results": [
-                {k: v for k, v in r.items() if k != "rows"}
-                for r in sorted_results
-            ],
+            "results": sorted_results,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
@@ -569,6 +574,11 @@ def format_results(
     for r in sorted_results:
         if r["status"] == "OK":
             lines.append(f"[OK]  {r['server']}:{r['db']}  affected={r['affected']}")
+            if r.get("rows") and r["rows"]["data"]:
+                cols = r["rows"]["columns"]
+                lines.append(f"      columns: {', '.join(cols)}")
+                for row_data in r["rows"]["data"]:
+                    lines.append(f"      {row_data}")
         elif r["status"] == "DRY":
             lines.append(f"[DRY] {r['server']}:{r['db']}")
         else:
@@ -696,6 +706,11 @@ def main() -> None:
         metavar="DOSYA",
         help="Hatalı DB'leri sunucu:db formatında bu dosyaya kaydet",
     )
+    parser.add_argument(
+        "--show-results",
+        action="store_true",
+        help="SELECT sorgularının döndürdüğü satırları logda göster",
+    )
     args = parser.parse_args()
 
     dry_run: bool = args.dry_run
@@ -759,6 +774,7 @@ def main() -> None:
             dry_run=dry_run,
             timeout=args.timeout,
             use_transaction=not args.no_transaction,
+            show_results=args.show_results,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]İşlem kesildi.[/]")
