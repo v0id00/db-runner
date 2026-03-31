@@ -418,6 +418,7 @@ async def execute_on_db(
     show_results: bool = False,
     stop_event: Optional[asyncio.Event] = None,
     retry: int = 0,
+    delay_ms: int = 0,
 ) -> None:
     """Execute SQL on one database (rate-limited by semaphore)."""
     server_name = conn["name"]
@@ -425,6 +426,9 @@ async def execute_on_db(
         if stop_event and stop_event.is_set():
             progress.advance(task_id)
             return
+
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000)
 
         if dry_run:
             await asyncio.sleep(0)
@@ -507,6 +511,7 @@ async def run_sql_on_all(
     show_results: bool = False,
     stop_on_error: bool = False,
     retry: int = 0,
+    delay_ms: int = 0,
 ) -> list[dict]:
     """Send SQL to the selected databases in parallel."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -565,6 +570,7 @@ async def run_sql_on_all(
                 show_results=show_results,
                 stop_event=stop_event,
                 retry=retry,
+                delay_ms=delay_ms,
             )
         )
 
@@ -873,6 +879,13 @@ def main() -> None:
         help="Retry failed databases N times with exponential backoff",
     )
     parser.add_argument(
+        "--delay",
+        type=int,
+        default=0,
+        metavar="MS",
+        help="Per-database execution delay in milliseconds (rate limiting)",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -962,6 +975,7 @@ def main() -> None:
             show_results=args.show_results,
             stop_on_error=args.stop_on_error,
             retry=args.retry,
+            delay_ms=args.delay,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation interrupted.[/]")
