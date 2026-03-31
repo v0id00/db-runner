@@ -257,10 +257,24 @@ async def execute_on_db(
     progress: Progress,
     task_id: object,
     results: list,
+    dry_run: bool = False,
 ) -> None:
     """Bir veritabanında SQL çalıştır (semaphore ile hız sınırlaması)."""
     server_name = conn["name"]
     async with semaphore:
+        if dry_run:
+            await asyncio.sleep(0)  # event loop'a söz ver
+            results.append({
+                "server": server_name,
+                "db": db_name,
+                "status": "DRY",
+                "affected": 0,
+                "error": None,
+                "rows": None,
+            })
+            progress.advance(task_id)
+            return
+
         try:
             connection = await aiomysql.connect(
                 host=conn["host"],
@@ -281,6 +295,7 @@ async def execute_on_db(
                         "status": "OK",
                         "affected": affected,
                         "error": None,
+                        "rows": None,
                     })
             finally:
                 connection.close()
@@ -291,6 +306,7 @@ async def execute_on_db(
                 "status": "ERR",
                 "affected": 0,
                 "error": str(e),
+                "rows": None,
             })
         finally:
             progress.advance(task_id)
@@ -300,6 +316,7 @@ async def run_sql_on_all(
     selected: list[tuple[str, str]],
     connections: list[dict],
     sql: str,
+    dry_run: bool = False,
 ) -> list[dict]:
     """Seçili veritabanlarına paralel SQL gönder."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -325,8 +342,9 @@ async def run_sql_on_all(
         console=console,
         transient=False,
     )
+    dry_label = " [yellow](DRY RUN)[/]" if dry_run else ""
     progress.start()
-    task_id = progress.add_task("[cyan]SQL gönderiliyor...", total=len(selected))
+    task_id = progress.add_task(f"[cyan]SQL gönderiliyor...{dry_label}", total=len(selected))
 
     tasks = []
     for server_name, db_name in selected:
@@ -350,21 +368,22 @@ async def run_sql_on_all(
                 progress,
                 task_id,
                 results,
+                dry_run=dry_run,
             )
         )
 
     await asyncio.gather(*tasks)
 
+    dry_count = sum(1 for r in results if r["status"] == "DRY")
     ok = sum(1 for r in results if r["status"] == "OK")
-    err = len(results) - ok
-    status_color = "green" if err == 0 else "yellow" if ok > 0 else "red"
-    progress.update(
-        task_id,
-        description=(
-            f"[{status_color}]✓ Tamamlandı[/]  "
-            f"[green]{ok} başarılı[/]  [red]{err} hatalı[/]"
-        ),
-    )
+    err = len(results) - ok - dry_count
+    if dry_run:
+        status_color = "yellow"
+        done_label = f"[yellow]DRY RUN — {dry_count} veritabanı hedeflendi[/]"
+    else:
+        status_color = "green" if err == 0 else "yellow" if ok > 0 else "red"
+        done_label = f"[{status_color}]✓ Tamamlandı[/]  [green]{ok} başarılı[/]  [red]{err} hatalı[/]"
+    progress.update(task_id, description=done_label)
     progress.stop()
 
     wait_for_keypress()
@@ -376,26 +395,36 @@ async def run_sql_on_all(
 # 7. Log görüntüleme
 # ---------------------------------------------------------------------------
 
-def show_log(results: list[dict], sql: str) -> None:
+def show_log(results: list[dict], sql: str, dry_run: bool = False) -> None:
     """Sonuçları özet panelde ve vim'de göster."""
-    ok_count = sum(1 for r in results if r["status"] == "OK")
-    err_count = len(results) - ok_count
+    dry_count = sum(1 for r in results if r["status"] == "DRY")
+    ok_count  = sum(1 for r in results if r["status"] == "OK")
+    err_count = sum(1 for r in results if r["status"] == "ERR")
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Terminale özet
-    summary_color = "green" if err_count == 0 else "yellow" if ok_count > 0 else "red"
+    if dry_run:
+        summary_color = "yellow"
+        summary_text = f"[yellow]DRY RUN[/]  {dry_count} veritabanı hedeflenirdi"
+    else:
+        summary_color = "green" if err_count == 0 else "yellow" if ok_count > 0 else "red"
+        summary_text = (
+            f"[green]Başarılı:[/] {ok_count}   [red]Hatalı:[/] {err_count}   "
+            f"[dim]Toplam: {len(results)}[/]"
+        )
     console.print()
     console.print(Panel(
-        f"[green]Başarılı:[/] {ok_count}   [red]Hatalı:[/] {err_count}   "
-        f"[dim]Toplam: {len(results)}[/]",
+        summary_text,
         title="[bold]Sonuç Özeti[/]",
         border_style=summary_color,
     ))
 
     # Log içeriği oluştur
+    dry_tag = "  [DRY RUN]" if dry_run else ""
     header_lines = [
-        f"# db-runner Log — {timestamp}",
-        f"# Toplam: {len(results)}  Başarılı: {ok_count}  Hatalı: {err_count}",
+        f"# db-runner Log — {timestamp}{dry_tag}",
+        f"# Toplam: {len(results)}  Başarılı: {ok_count}  Hatalı: {err_count}"
+        + (f"  DryRun: {dry_count}" if dry_run else ""),
         "#",
         "# Çalıştırılan SQL:",
         *[f"#   {line}" for line in sql.splitlines()],
@@ -411,6 +440,8 @@ def show_log(results: list[dict], sql: str) -> None:
     for r in sorted(results, key=lambda x: (x["status"] != "ERR", x["server"], x["db"])):
         if r["status"] == "OK":
             result_lines.append(f"[OK]  {r['server']}:{r['db']}  affected={r['affected']}")
+        elif r["status"] == "DRY":
+            result_lines.append(f"[DRY] {r['server']}:{r['db']}")
         else:
             result_lines.append(f"[ERR] {r['server']}:{r['db']}  {r['error']}")
 
@@ -446,6 +477,7 @@ def main() -> None:
             "  python db_runner.py\n"
             "  python db_runner.py -c /etc/db_runner/connections.json\n"
             "  python db_runner.py --sql update.sql\n"
+            "  python db_runner.py --dry-run\n"
         ),
     )
     parser.add_argument(
@@ -459,10 +491,18 @@ def main() -> None:
         metavar="DOSYA",
         help="SQL'i dosyadan oku (belirtilmezse vim açılır)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="SQL çalıştırmadan hedef veritabanlarını göster",
+    )
     args = parser.parse_args()
 
+    dry_run: bool = args.dry_run
+
+    header_extra = "  [yellow bold][DRY RUN][/]" if dry_run else ""
     console.print(Panel(
-        "[bold cyan]db-runner[/]  —  MySQL/MariaDB Toplu SQL Aracı\n"
+        f"[bold cyan]db-runner[/]  —  MySQL/MariaDB Toplu SQL Aracı{header_extra}\n"
         "[dim]Çıkmak için istediğiniz zaman Ctrl+C kullanabilirsiniz[/]",
         border_style="cyan",
     ))
@@ -509,13 +549,13 @@ def main() -> None:
 
     # 5-6. Paralel SQL çalıştır + progress
     try:
-        results = asyncio.run(run_sql_on_all(selected, connections, sql))
+        results = asyncio.run(run_sql_on_all(selected, connections, sql, dry_run=dry_run))
     except KeyboardInterrupt:
         console.print("\n[yellow]İşlem kesildi.[/]")
         sys.exit(0)
 
     # 7. Log göster
-    show_log(results, sql)
+    show_log(results, sql, dry_run=dry_run)
 
 
 if __name__ == "__main__":
