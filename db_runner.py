@@ -15,6 +15,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import termios
+import tty
 from datetime import datetime
 from typing import Optional
 
@@ -234,6 +236,19 @@ def select_databases(db_map: dict[str, list[str]]) -> list[tuple[str, str]]:
 # 5-6. Paralel SQL çalıştırma + progress bar
 # ---------------------------------------------------------------------------
 
+def wait_for_keypress(prompt: str = "\n[dim]Devam etmek için bir tuşa basın...[/]") -> None:
+    """Terminalde tek tuş bekle (echo yok)."""
+    console.print(prompt, end="")
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    console.print()
+
+
 async def execute_on_db(
     conn: dict,
     db_name: str,
@@ -297,7 +312,7 @@ async def run_sql_on_all(
 
     results: list[dict] = []
 
-    with Progress(
+    progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(bar_width=40),
@@ -309,35 +324,50 @@ async def run_sql_on_all(
         TimeRemainingColumn(),
         console=console,
         transient=False,
-    ) as progress:
-        task_id = progress.add_task("[cyan]SQL gönderiliyor...", total=len(selected))
+    )
+    progress.start()
+    task_id = progress.add_task("[cyan]SQL gönderiliyor...", total=len(selected))
 
-        tasks = []
-        for server_name, db_name in selected:
-            if server_name not in conn_map:
-                results.append({
-                    "server": server_name,
-                    "db": db_name,
-                    "status": "ERR",
-                    "affected": 0,
-                    "error": f"Sunucu tanımsız: {server_name}",
-                })
-                progress.advance(task_id)
-                continue
+    tasks = []
+    for server_name, db_name in selected:
+        if server_name not in conn_map:
+            results.append({
+                "server": server_name,
+                "db": db_name,
+                "status": "ERR",
+                "affected": 0,
+                "error": f"Sunucu tanımsız: {server_name}",
+            })
+            progress.advance(task_id)
+            continue
 
-            tasks.append(
-                execute_on_db(
-                    conn_map[server_name],
-                    db_name,
-                    sql,
-                    semaphores[server_name],
-                    progress,
-                    task_id,
-                    results,
-                )
+        tasks.append(
+            execute_on_db(
+                conn_map[server_name],
+                db_name,
+                sql,
+                semaphores[server_name],
+                progress,
+                task_id,
+                results,
             )
+        )
 
-        await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
+
+    ok = sum(1 for r in results if r["status"] == "OK")
+    err = len(results) - ok
+    status_color = "green" if err == 0 else "yellow" if ok > 0 else "red"
+    progress.update(
+        task_id,
+        description=(
+            f"[{status_color}]✓ Tamamlandı[/]  "
+            f"[green]{ok} başarılı[/]  [red]{err} hatalı[/]"
+        ),
+    )
+    progress.stop()
+
+    wait_for_keypress()
 
     return results
 
