@@ -222,8 +222,16 @@ def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
             pass
 
 
-def get_sql_from_vim() -> str:
+def get_sql_from_vim(no_vim: bool = False) -> str:
     """Get SQL input from the user via vim (appending history to the template)."""
+    if no_vim:
+        console.print("\n[bold cyan]Reading SQL from stdin...[/] (Ctrl+D to finish)\n")
+        sql = sys.stdin.read().strip()
+        if not sql:
+            console.print("[yellow]SQL is empty, exiting.[/]")
+            sys.exit(0)
+        return sql
+
     console.print("\n[bold cyan]► Opening vim[/] — write your SQL, save and quit [dim](:wq)[/]\n")
 
     history_block = history_comment_block()
@@ -317,6 +325,7 @@ def select_databases(
     db_map: dict[str, list[str]],
     dbfilter: Optional[str] = None,
     exclude_db: Optional[str] = None,
+    no_vim: bool = False,
 ) -> list[tuple[str, str]]:
     """
     Display all DBs in vim; the user deletes lines they don't want to target.
@@ -361,6 +370,14 @@ def select_databases(
         console.print("[red]No databases match the filter, exiting.[/]")
         sys.exit(0)
 
+    if no_vim:
+        selected: list[tuple[str, str]] = []
+        for line in all_entries:
+            parsed = parse_server_db_line(line)
+            if parsed:
+                selected.append(parsed)
+        return selected
+
     filter_note = f"\n# --dbfilter '{dbfilter}' is active\n" if dbfilter else ""
     comment = (
         "# ──────────────────────────────────────────────────────────────\n"
@@ -378,7 +395,7 @@ def select_databases(
 
     content = open_vim("\n".join(all_entries) + "\n", suffix=".txt", comment=comment)
 
-    selected: list[tuple[str, str]] = []
+    selected = []
     for line in content.splitlines():
         parsed = parse_server_db_line(line)
         if parsed:
@@ -695,6 +712,7 @@ def show_log(
     sql_file_label: Optional[str] = None,
     quiet: bool = False,
     output_file: Optional[str] = None,
+    no_vim: bool = False,
 ) -> None:
     """Display results in a summary panel and in vim; optionally save to file."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
@@ -740,7 +758,7 @@ def show_log(
         except OSError as exc:
             console.print(f"[red]Error: could not write output file:[/] {exc}")
 
-    if quiet:
+    if quiet or no_vim:
         return
 
     log_content = format_results(results, sql, "plain", dry_run, timestamp, sql_file_label=sql_file_label)
@@ -953,6 +971,11 @@ def main() -> None:
         help="Save log to this file (format controlled by --log-format)",
     )
     parser.add_argument(
+        "--no-vim",
+        action="store_true",
+        help="Skip all vim steps (SQL from stdin if --sql not given, select all DBs, no log viewer)",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -1008,7 +1031,7 @@ def main() -> None:
             sqls.append((fname, content))
             console.print(f"[green]✓[/] SQL read from file: {fname}")
     else:
-        sql_text = get_sql_from_vim()
+        sql_text = get_sql_from_vim(no_vim=args.no_vim)
         console.print(f"[green]✓[/] SQL received ({len(sql_text.splitlines())} line(s)).")
         sqls = [(None, sql_text)]
 
@@ -1029,7 +1052,7 @@ def main() -> None:
         sys.exit(1)
 
     # 4. Filter database list
-    selected = select_databases(db_map, dbfilter=args.dbfilter, exclude_db=args.exclude_db)
+    selected = select_databases(db_map, dbfilter=args.dbfilter, exclude_db=args.exclude_db, no_vim=args.no_vim)
 
     if not selected:
         console.print("[yellow]No databases selected, exiting.[/]")
@@ -1070,6 +1093,7 @@ def main() -> None:
             sql_file_label=fname if multi_file else None,
             quiet=args.quiet,
             output_file=args.output,
+            no_vim=args.no_vim,
         )
 
 
