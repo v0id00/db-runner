@@ -512,15 +512,23 @@ async def run_sql_on_all(
     stop_on_error: bool = False,
     retry: int = 0,
     delay_ms: int = 0,
+    concurrency: Optional[int] = None,
 ) -> list[dict]:
     """Send SQL to the selected databases in parallel."""
     conn_map = {conn["name"]: conn for conn in connections}
 
-    semaphores: dict[str, asyncio.Semaphore] = {
-        server: asyncio.Semaphore(conn_map[server].get("max_connections", 3))
-        for server in {s for s, _ in selected}
-        if server in conn_map
-    }
+    if concurrency:
+        semaphores: dict[str, asyncio.Semaphore] = {
+            server: asyncio.Semaphore(concurrency)
+            for server in {s for s, _ in selected}
+            if server in conn_map
+        }
+    else:
+        semaphores = {
+            server: asyncio.Semaphore(conn_map[server].get("max_connections", 3))
+            for server in {s for s, _ in selected}
+            if server in conn_map
+        }
 
     stop_event = asyncio.Event() if stop_on_error else None
     results: list[dict] = []
@@ -886,6 +894,13 @@ def main() -> None:
         help="Per-database execution delay in milliseconds (rate limiting)",
     )
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override per-server max_connections with a global concurrency limit",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -976,6 +991,7 @@ def main() -> None:
             stop_on_error=args.stop_on_error,
             retry=args.retry,
             delay_ms=args.delay,
+            concurrency=args.concurrency,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation interrupted.[/]")
