@@ -84,7 +84,66 @@ def load_connections(path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Vim entegrasyonu
+# 2. SQL geçmişi
+# ---------------------------------------------------------------------------
+
+HISTORY_FILE = os.path.expanduser("~/.db_runner_history")
+HISTORY_MAX  = 100   # saklanacak maksimum giriş sayısı
+HISTORY_SHOW = 10    # vim'de önizlemede gösterilecek son N giriş
+
+
+def history_load() -> list[dict]:
+    """~/.db_runner_history dosyasını JSON satırları olarak oku."""
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    entries = []
+    try:
+        with open(HISTORY_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    except OSError:
+        pass
+    return entries
+
+
+def history_save(sql: str) -> None:
+    """SQL'i geçmiş dosyasına ekle, HISTORY_MAX aşılırsa eskiyi sil."""
+    entry = {"ts": datetime.now().isoformat(timespec="seconds"), "sql": sql}
+    entries = history_load()
+    entries.append(entry)
+    entries = entries[-HISTORY_MAX:]
+    try:
+        with open(HISTORY_FILE, "w") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        console.print(f"[yellow]Uyarı: geçmiş kaydedilemedi:[/] {exc}")
+
+
+def history_comment_block() -> str:
+    """Son HISTORY_SHOW girişi vim şablonunun üstüne yorum olarak ekle."""
+    entries = history_load()
+    if not entries:
+        return ""
+    recent = entries[-HISTORY_SHOW:][::-1]  # en yeni üstte
+    lines = ["-- ──── Son sorgular (geçmiş) ────────────────────────────────"]
+    for e in recent:
+        ts = e.get("ts", "")
+        for i, sql_line in enumerate(e["sql"].splitlines()):
+            prefix = f"-- [{ts}] " if i == 0 else "--          "
+            lines.append(f"{prefix}{sql_line}")
+    lines.append("-- ─────────────────────────────────────────────────────────")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# 3. Vim entegrasyonu
 # ---------------------------------------------------------------------------
 
 def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
@@ -114,13 +173,15 @@ def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
 
 
 def get_sql_from_vim() -> str:
-    """Kullanıcıdan vim aracılığıyla SQL girdisi al."""
+    """Kullanıcıdan vim aracılığıyla SQL girdisi al (geçmişi şablona ekle)."""
     console.print("\n[bold cyan]► Vim açılıyor[/] — SQL'i yazın, kaydedin ve çıkın [dim](:wq)[/]\n")
 
+    history_block = history_comment_block()
     template = (
-        "-- SQL'i buraya yazın\n"
-        "-- Birden fazla ifade için noktalı virgül (;) kullanın\n"
-        "-- Hazır olunca: :wq\n\n"
+        history_block
+        + "-- SQL'i buraya yazın\n"
+        + "-- Birden fazla ifade için noktalı virgül (;) kullanın\n"
+        + "-- Hazır olunca: :wq\n\n"
     )
     content = open_vim(template, suffix=".sql")
 
@@ -526,6 +587,8 @@ def main() -> None:
     else:
         sql = get_sql_from_vim()
         console.print(f"[green]✓[/] SQL alındı ({len(sql.splitlines())} satır).")
+
+    history_save(sql)
 
     # 3. Veritabanı listelerini çek
     try:
