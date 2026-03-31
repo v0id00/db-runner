@@ -315,6 +315,7 @@ def parse_server_db_line(line: str) -> Optional[tuple[str, str]]:
 def select_databases(
     db_map: dict[str, list[str]],
     dbfilter: Optional[str] = None,
+    exclude_db: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     """
     Display all DBs in vim; the user deletes lines they don't want to target.
@@ -329,7 +330,7 @@ def select_databases(
         console.print("[red]No databases found, exiting.[/]")
         sys.exit(0)
 
-    # Apply dbfilter
+    # Apply dbfilter (include only matching)
     if dbfilter:
         try:
             pattern = re.compile(dbfilter, re.IGNORECASE)
@@ -341,6 +342,19 @@ def select_databases(
         if filtered_out:
             console.print(f"[dim]--dbfilter '{dbfilter}': {filtered_out} database(s) filtered out.[/]")
         all_entries = filtered_entries
+
+    # Apply exclude_db (remove matching)
+    if exclude_db:
+        try:
+            excl_pattern = re.compile(exclude_db, re.IGNORECASE)
+        except re.error as e:
+            console.print(f"[red]Error:[/] --exclude-db regex is invalid: {e}")
+            sys.exit(1)
+        before = len(all_entries)
+        all_entries = [e for e in all_entries if not excl_pattern.search(e.split(".", 1)[-1] if "." in e else e)]
+        excluded = before - len(all_entries)
+        if excluded:
+            console.print(f"[dim]--exclude-db '{exclude_db}': {excluded} database(s) excluded.[/]")
 
     if not all_entries:
         console.print("[red]No databases match the filter, exiting.[/]")
@@ -810,6 +824,11 @@ def main() -> None:
         help="Regex filter for database names (applied before showing the list)",
     )
     parser.add_argument(
+        "--exclude-db",
+        metavar="REGEX",
+        help="Regex to exclude matching database names from the list",
+    )
+    parser.add_argument(
         "--server",
         metavar="REGEX",
         help="Filter connections by name/alias using a regex",
@@ -878,7 +897,7 @@ def main() -> None:
         sys.exit(1)
 
     # 4. Filter database list
-    selected = select_databases(db_map, dbfilter=args.dbfilter)
+    selected = select_databases(db_map, dbfilter=args.dbfilter, exclude_db=args.exclude_db)
 
     if not selected:
         console.print("[yellow]No databases selected, exiting.[/]")
