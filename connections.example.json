@@ -3,15 +3,15 @@
     "name": "prod-1",
     "host": "db1.example.com",
     "port": 3306,
-    "user": "root",
-    "password": "secret",
+    "user": "myuser",
+    "password": "mypassword",
     "max_connections": 3
   },
   {
     "name": "prod-2",
     "host": "db2.example.com",
     "port": 3306,
-    "user": "root",
-    "password": "secret"
+    "user": "myuser",
+    "password": "mypassword"
   }
 ]

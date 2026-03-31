@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 *.log
+
 # Gerçek bağlantı bilgilerini commit etme
-# connections.json dosyasını kopyalayıp düzenleyin
-connections.local.json
+# Kullanmak için: cp connections.example.json connections.json
+connections.json
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

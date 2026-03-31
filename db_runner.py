@@ -666,7 +666,7 @@ def main() -> None:
         "-c", "--connections",
         default="connections.json",
         metavar="DOSYA",
-        help="Bağlantı konfigürasyon dosyası (varsayılan: connections.json)",
+        help="Bağlantı konfigürasyon dosyası (varsayılan: connections.json — örnek: connections.example.json)",
     )
     parser.add_argument(
         "--sql",

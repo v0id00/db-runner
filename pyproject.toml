@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "db-runner"
+version = "1.0.0"
+description = "Broadcast SQL to multiple MySQL/MariaDB databases in parallel"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "aiomysql>=0.2.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+db-runner = "db_runner:main"
+
+[tool.setuptools]
+py-modules = ["db_runner"]
