@@ -76,7 +76,8 @@ cp connections.example.json ~/.config/db-runner/connections.json
 ## Usage
 
 ```bash
-db-runner                              # vim opens for SQL input
+db-runner                              # editor opens for SQL input
+db-runner --wizard                     # interactive setup wizard
 db-runner --sql update.sql             # read SQL from file
 db-runner --sql a.sql b.sql c.sql      # run multiple files sequentially
 db-runner --dry-run                    # preview targeted databases without executing
@@ -87,15 +88,16 @@ db-runner -c /path/to/servers.json     # use a different config file
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-c, --connections FILE` | `connections.json` | Connection config file |
+| `-c, --connections FILE` | auto | Connection config file |
 | `--sql FILE [FILE ...]` | — | Read SQL from file(s); multiple files run sequentially |
-| `--dry-run` | off | Preview targeted databases without executing || `--force` | off | Skip confirmation for destructive SQL |
+| `--dry-run` | off | Preview targeted databases without executing |
+| `--force` | off | Skip confirmation for destructive SQL |
 | `--timeout SECONDS` | `30` | Per-query timeout |
 | `--no-transaction` | off | Run in autocommit mode (no rollback on error) |
 | `--log-format FORMAT` | `plain` | Log format: `plain`, `json`, or `csv` |
 | `--output FILE` | — | Save log to file (format set by `--log-format`) |
 | `--failed-output FILE` | — | Save failed `server.db` entries to a separate file |
-| `--show-results` | off | Include SELECT result rows in the log |
+| `--show-results` | off | Include SELECT result rows as formatted tables in the log |
 | `--dbfilter REGEX` | — | Include only databases whose name matches this regex |
 | `--exclude-db REGEX` | — | Exclude databases whose name matches this regex |
 | `--server REGEX` | — | Filter connections by name/alias |
@@ -105,9 +107,11 @@ db-runner -c /path/to/servers.json     # use a different config file
 | `--delay MS` | `0` | Per-database delay in milliseconds (rate limiting) |
 | `--concurrency N` | per-server | Override `max_connections` globally for this run |
 | `--delimiter STR` | `;` | Statement separator (e.g. `$$` for stored procedures) |
-| `--quiet` | off | No progress bar, no keypress, no vim log (CI/cron mode) |
+| `--quiet` | off | No progress bar, no keypress, no editor log (CI/cron mode) |
 | `--no-vim` | off | Skip all editor steps; read SQL from stdin if `--sql` not given |
 | `--vault FILE` | — | Load passwords from a `name=password` file |
+| `--no-partial-log` | off | On Ctrl+C, exit silently instead of showing partial results |
+| `--wizard` | off | Launch interactive setup wizard to configure all options |
 | `-h, --help` | — | Show the help page |
 
 ## Workflow
@@ -153,7 +157,21 @@ db-runner --tags prod,eu
 db-runner --server "prod-eu-[12]"
 ```
 
-All filters can be combined — they are applied in order before the vim selection step opens.
+All filters can be combined — they are applied in order before the editor selection step opens.
+
+## Wizard
+
+`--wizard` launches an interactive step-by-step prompt that walks through every option:
+
+```bash
+db-runner --wizard
+```
+
+The wizard covers all options (connections file, SQL source, database filters, execution settings, output format) and prints the equivalent command-line invocation at the end before running. You can also combine `--wizard` with explicit flags — wizard values are applied first, explicit flags take precedence.
+
+## Interrupt & partial log
+
+If you press **Ctrl+C** while SQL is executing, db-runner stops cleanly and shows the log of all operations that completed before the interrupt. Use `--no-partial-log` to suppress this and exit immediately.
 
 ## Vault file
 
@@ -185,7 +203,7 @@ db-runner --sql patch.sql --no-vim --quiet --retry 3 --stop-on-error
 - **Destructive SQL detection** — queries containing `DROP`, `TRUNCATE`, `DELETE`, or `ALTER TABLE` trigger a confirmation prompt. Use `--force` to bypass.
 - **Transactions** — each query runs inside a transaction by default; errors trigger automatic rollback. Use `--no-transaction` to disable.
 - **Dry run** — `--dry-run` shows exactly which databases would be targeted without executing anything.
-- **Query history** — every executed SQL is saved to `~/.db_runner_history` (last 100 entries), shown as comments in the vim SQL buffer.
+- **Query history** — every executed SQL is saved to `~/.db_runner_history` (last 100 entries), shown as comments in the editor SQL buffer.
 
 ## License
 

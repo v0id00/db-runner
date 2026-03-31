@@ -615,8 +615,13 @@ async def run_sql_on_all(
     concurrency: Optional[int] = None,
     delimiter: str = ";",
     quiet: bool = False,
+    _results: Optional[list[dict]] = None,
 ) -> list[dict]:
     """Send SQL to the selected databases in parallel."""
+    # Use a pre-allocated list when provided so callers can read partial
+    # results after a KeyboardInterrupt without losing completed work.
+    results: list[dict] = _results if _results is not None else []
+
     conn_map = {conn["name"]: conn for conn in connections}
 
     if concurrency:
@@ -633,7 +638,6 @@ async def run_sql_on_all(
         }
 
     stop_event = asyncio.Event() if stop_on_error else None
-    results: list[dict] = []
 
     if quiet:
         progress = None
@@ -691,27 +695,42 @@ async def run_sql_on_all(
             )
         )
 
-    await asyncio.gather(*tasks)
+    interrupted = False
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        interrupted = True
 
     if progress is not None:
         dry_count = sum(1 for r in results if r["status"] == "DRY")
         ok = sum(1 for r in results if r["status"] == "OK")
         err = len(results) - ok - dry_count
-        if dry_run:
-            status_color = "yellow"
+        pending = len(selected) - len(results)
+        if interrupted:
+            done_label = (
+                f"[yellow]⚠ Interrupted[/]  "
+                f"[green]{ok} done[/]  [red]{err} failed[/]  [dim]{pending} pending[/]"
+            )
+        elif dry_run:
             done_label = f"[yellow]DRY RUN — {dry_count} database(s) targeted[/]"
         else:
             status_color = "green" if err == 0 else "yellow" if ok > 0 else "red"
             done_label = f"[{status_color}]✓ Done[/]  [green]{ok} successful[/]  [red]{err} failed[/]"
         progress.update(task_id, description=done_label)
         progress.stop()
-        if dry_run:
+        if interrupted:
+            console.print(Rule(
+                f"[yellow]⚠  Interrupted — {len(results)}/{len(selected)} completed[/]",
+                style="yellow",
+            ))
+        elif dry_run:
             console.print(Rule("[yellow]Dry run complete[/]", style="yellow"))
         elif err == 0:
             console.print(Rule("[green]✓  All operations successful[/]", style="green"))
         else:
             console.print(Rule(f"[yellow]Done  ·  {ok} succeeded  ·  {err} failed[/]", style="yellow"))
-        wait_for_keypress()
+        if not interrupted:
+            wait_for_keypress()
 
     return results
 
@@ -772,16 +791,34 @@ def format_results(
     ]
     for r in sorted_results:
         if r["status"] == "OK":
-            lines.append(f"[OK]  {r['server']}:{r['db']}  affected={r['affected']}")
+            lines.append(f"[OK]  {r['server']}.{r['db']}  affected={r['affected']}")
             if r.get("rows") and r["rows"]["data"]:
                 cols = r["rows"]["columns"]
-                lines.append(f"      columns: {', '.join(cols)}")
+                col_widths = [max(len(str(c)), max((len(str(row[i])) for row in r["rows"]["data"]), default=0))
+                              for i, c in enumerate(cols)]
+                sep = "  ├─" + "─┬─".join("─" * w for w in col_widths) + "─┤"
+                header = "  │ " + " │ ".join(str(c).ljust(col_widths[i]) for i, c in enumerate(cols)) + " │"
+                divider = "  ├─" + "─┼─".join("─" * w for w in col_widths) + "─┤"
+                top = "  ┌─" + "─┬─".join("─" * w for w in col_widths) + "─┐"
+                bot = "  └─" + "─┴─".join("─" * w for w in col_widths) + "─┘"
+                lines.append(top)
+                lines.append(header)
+                lines.append(divider)
                 for row_data in r["rows"]["data"]:
-                    lines.append(f"      {row_data}")
+                    lines.append("  │ " + " │ ".join(str(v).ljust(col_widths[i]) for i, v in enumerate(row_data)) + " │")
+                lines.append(bot)
+                lines.append(f"  ({len(r['rows']['data'])} row(s))")
+            lines.append("")
         elif r["status"] == "DRY":
-            lines.append(f"[DRY] {r['server']}:{r['db']}")
+            lines.append(f"[DRY] {r['server']}.{r['db']}")
+            lines.append("")
         else:
-            lines.append(f"[ERR] {r['server']}:{r['db']}  {r['error']}")
+            lines.append(f"[ERR] {r['server']}.{r['db']}")
+            lines.append(f"      {r['error']}")
+            lines.append("")
+    # Remove trailing blank line
+    while lines and lines[-1] == "":
+        lines.pop()
     return "\n".join(lines) + "\n"
 
 
@@ -795,19 +832,23 @@ def show_log(
     quiet: bool = False,
     output_file: Optional[str] = None,
     no_vim: bool = False,
+    interrupted: bool = False,
 ) -> None:
-    """Display results in a summary panel and in vim; optionally save to file."""
+    """Display results in a summary panel and in editor; optionally save to file."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
     ok_count  = sum(1 for r in results if r["status"] == "OK")
     err_count = sum(1 for r in results if r["status"] == "ERR")
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Print summary to terminal
-    if dry_run:
+    if interrupted:
+        summary_color = "yellow"
+    elif dry_run:
         summary_color = "yellow"
     else:
         summary_color = "green" if err_count == 0 else "yellow" if ok_count > 0 else "red"
     title_extra = f" — {sql_file_label}" if sql_file_label else ""
+    title_interrupt = " (partial)" if interrupted else ""
 
     stats = Table(box=box.SIMPLE, show_header=False, pad_edge=False, padding=(0, 2))
     stats.add_column("metric")
@@ -815,6 +856,8 @@ def show_log(
     if dry_run:
         stats.add_row("[yellow]◆  Dry run targets[/]", f"[bold yellow]{dry_count}[/]")
     else:
+        if interrupted:
+            stats.add_row("[yellow]⚠  Interrupted (partial)[/]", "")
         stats.add_row("[green]✓  Successful[/]", f"[bold green]{ok_count}[/]")
         stats.add_row(
             "[red]✗  Failed[/]" if err_count else "[dim]✗  Failed[/]",
@@ -824,7 +867,7 @@ def show_log(
     console.print()
     console.print(Panel(
         stats,
-        title=f"[bold]Result Summary{title_extra}[/]",
+        title=f"[bold]Result Summary{title_extra}{title_interrupt}[/]",
         border_style=summary_color,
         expand=False,
         padding=(0, 2),
@@ -908,9 +951,14 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
   [green]--quiet[/]                        Suppress progress bar, keypress, and editor log (CI/cron)
   [green]--no-vim[/]                       Skip all editor steps; SQL from stdin if [dim]--sql[/] not given
   [green]--vault[/] [dim]FILE[/]                Key=value file to override connection passwords
+  [green]--no-partial-log[/]               On Ctrl+C, exit silently instead of showing completed results
+  [green]--wizard[/]                       Launch interactive setup wizard to configure all options
   [green]-h, --help[/]                     Show this help page
 
 [bold]EXAMPLES[/]
+  [dim]# Interactive wizard — configure everything via prompts[/]
+  [cyan]db-runner[/] --wizard
+
   [dim]# Standard usage — enter SQL via editor, filter the DB list[/]
   [cyan]db-runner[/]
 
@@ -993,6 +1041,167 @@ def print_help() -> None:
     """Display the help page with rich formatting."""
     from rich.padding import Padding
     console.print(Padding(HELP_TEXT.strip(), (1, 2)))
+
+
+# ---------------------------------------------------------------------------
+# Wizard mode
+# ---------------------------------------------------------------------------
+
+def run_wizard() -> list[str]:
+    """
+    Interactive wizard that guides the user through every option.
+    Returns a list of argv tokens to inject before re-parsing.
+    """
+    from rich.prompt import Confirm, Prompt, IntPrompt
+    from rich.padding import Padding
+
+    console.print()
+    console.print(Panel(
+        Align.center(
+            "[bold cyan]db-runner  —  Setup Wizard[/]\n"
+            "[dim]Answer each prompt to configure this run.\n"
+            "Press Enter to accept the default value.[/]"
+        ),
+        border_style="cyan",
+        padding=(1, 4),
+    ))
+
+    argv: list[str] = []
+
+    def section(title: str) -> None:
+        console.print(Rule(f"[bold cyan] {title} [/]", style="dim cyan"))
+
+    # ── Connections ────────────────────────────────────────────────────────
+    section("Connections")
+    conn_file = Prompt.ask(
+        "[bold]Connections file[/]",
+        default="(auto)",
+        console=console,
+    )
+    if conn_file and conn_file != "(auto)":
+        argv += ["-c", conn_file]
+
+    vault = Prompt.ask("[bold]Vault file[/] (leave blank to skip)", default="", console=console)
+    if vault:
+        argv += ["--vault", vault]
+
+    server_filter = Prompt.ask("[bold]Filter servers[/] by name regex (blank = all)", default="", console=console)
+    if server_filter:
+        argv += ["--server", server_filter]
+
+    tags = Prompt.ask("[bold]Filter by tags[/] (comma-separated, blank = all)", default="", console=console)
+    if tags:
+        argv += ["--tags", tags]
+
+    # ── SQL ────────────────────────────────────────────────────────────────
+    section("SQL")
+    sql_source = Prompt.ask(
+        "[bold]SQL source[/]",
+        choices=["editor", "file", "stdin"],
+        default="editor",
+        console=console,
+    )
+    if sql_source == "file":
+        sql_file = Prompt.ask("[bold]SQL file path[/]", console=console)
+        argv += ["--sql", sql_file]
+    elif sql_source == "stdin":
+        argv += ["--no-vim"]
+
+    delimiter = Prompt.ask("[bold]Statement delimiter[/]", default=";", console=console)
+    if delimiter != ";":
+        argv += ["--delimiter", delimiter]
+
+    # ── Database filter ────────────────────────────────────────────────────
+    section("Database filter")
+    dbfilter = Prompt.ask("[bold]Include DBs matching regex[/] (blank = all)", default="", console=console)
+    if dbfilter:
+        argv += ["--dbfilter", dbfilter]
+
+    exclude_db = Prompt.ask("[bold]Exclude DBs matching regex[/] (blank = none)", default="", console=console)
+    if exclude_db:
+        argv += ["--exclude-db", exclude_db]
+
+    # ── Execution ──────────────────────────────────────────────────────────
+    section("Execution")
+    dry_run = Confirm.ask("[bold]Dry run?[/] (preview only, no execution)", default=False, console=console)
+    if dry_run:
+        argv += ["--dry-run"]
+
+    use_transaction = Confirm.ask("[bold]Wrap each DB in a transaction?[/]", default=True, console=console)
+    if not use_transaction:
+        argv += ["--no-transaction"]
+
+    force = Confirm.ask("[bold]Skip destructive-SQL confirmation?[/]", default=False, console=console)
+    if force:
+        argv += ["--force"]
+
+    timeout = IntPrompt.ask("[bold]Query timeout[/] (seconds)", default=30, console=console)
+    if timeout != 30:
+        argv += ["--timeout", str(timeout)]
+
+    concurrency = Prompt.ask("[bold]Global concurrency limit[/] (blank = per-server default)", default="", console=console)
+    if concurrency.isdigit():
+        argv += ["--concurrency", concurrency]
+
+    retry = IntPrompt.ask("[bold]Retry failed DBs[/] N times (0 = no retry)", default=0, console=console)
+    if retry:
+        argv += ["--retry", str(retry)]
+
+    delay = IntPrompt.ask("[bold]Per-DB delay[/] in ms (0 = none)", default=0, console=console)
+    if delay:
+        argv += ["--delay", str(delay)]
+
+    stop_on_error = Confirm.ask("[bold]Stop on first error?[/]", default=False, console=console)
+    if stop_on_error:
+        argv += ["--stop-on-error"]
+
+    # ── Output ─────────────────────────────────────────────────────────────
+    section("Output")
+    show_results = Confirm.ask("[bold]Show SELECT result rows in log?[/]", default=False, console=console)
+    if show_results:
+        argv += ["--show-results"]
+
+    log_format = Prompt.ask(
+        "[bold]Log format[/]",
+        choices=["plain", "json", "csv"],
+        default="plain",
+        console=console,
+    )
+    if log_format != "plain":
+        argv += ["--log-format", log_format]
+
+    output_file = Prompt.ask("[bold]Save log to file[/] (blank = skip)", default="", console=console)
+    if output_file:
+        argv += ["--output", output_file]
+
+    failed_output = Prompt.ask("[bold]Save failed DBs to file[/] (blank = skip)", default="", console=console)
+    if failed_output:
+        argv += ["--failed-output", failed_output]
+
+    quiet = Confirm.ask("[bold]Quiet mode?[/] (no progress bar, no keypress)", default=False, console=console)
+    if quiet:
+        argv += ["--quiet"]
+
+    no_partial_log = Confirm.ask("[bold]Suppress partial log on Ctrl+C?[/]", default=False, console=console)
+    if no_partial_log:
+        argv += ["--no-partial-log"]
+
+    # ── Summary ────────────────────────────────────────────────────────────
+    section("Summary")
+    if argv:
+        cmd = "db-runner " + " ".join(
+            f'"{a}"' if " " in a else a for a in argv
+        )
+        console.print(f"[dim]Equivalent command:[/]\n  [cyan]{cmd}[/]\n")
+    else:
+        console.print("[dim]Running with all defaults.[/]\n")
+
+    if not Confirm.ask("[bold]Proceed with these settings?[/]", default=True, console=console):
+        console.print("[yellow]Cancelled.[/]")
+        sys.exit(0)
+
+    console.print()
+    return argv
 
 
 def main() -> None:
@@ -1125,6 +1334,16 @@ def main() -> None:
         help="Key=value file to override connection passwords (format: connection_name=password)",
     )
     parser.add_argument(
+        "--no-partial-log",
+        action="store_true",
+        help="Do not show the partial log when execution is interrupted with Ctrl+C",
+    )
+    parser.add_argument(
+        "--wizard",
+        action="store_true",
+        help="Launch interactive setup wizard to configure all options before running",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -1134,6 +1353,14 @@ def main() -> None:
     if args.help:
         print_help()
         sys.exit(0)
+
+    # Wizard: collect extra argv tokens, then re-parse with them merged
+    if args.wizard:
+        wizard_argv = run_wizard()
+        # Re-parse: wizard flags take precedence over command-line defaults
+        # but explicit non-wizard CLI flags (other than --wizard) win.
+        original_argv = [a for a in sys.argv[1:] if a != "--wizard"]
+        args = parser.parse_args(wizard_argv + original_argv)
 
     dry_run: bool = args.dry_run
 
@@ -1223,8 +1450,10 @@ def main() -> None:
     for fname, sql_text in sqls:
         if multi_file:
             console.print(Rule(f"[dim]{fname}[/]", style="dim", align="left"))
+        partial_results: list[dict] = []
+        interrupted = False
         try:
-            results = asyncio.run(run_sql_on_all(
+            asyncio.run(run_sql_on_all(
                 selected, connections, sql_text,
                 dry_run=dry_run,
                 timeout=args.timeout,
@@ -1236,12 +1465,20 @@ def main() -> None:
                 concurrency=args.concurrency,
                 delimiter=args.delimiter,
                 quiet=args.quiet,
+                _results=partial_results,
             ))
         except KeyboardInterrupt:
-            console.print("\n[yellow]Operation interrupted.[/]")
+            interrupted = True
+            console.print("\n[yellow]⚠ Execution interrupted by user.[/]")
+
+        results = partial_results
+
+        # 7. Show log — always show partial results unless --no-partial-log
+        if interrupted and (args.no_partial_log or not results):
+            if not results:
+                console.print("[dim]No operations completed before interrupt.[/]")
             sys.exit(0)
 
-        # 7. Show log
         show_log(
             results, sql_text,
             dry_run=dry_run,
@@ -1251,7 +1488,11 @@ def main() -> None:
             quiet=args.quiet,
             output_file=args.output,
             no_vim=args.no_vim,
+            interrupted=interrupted,
         )
+
+        if interrupted:
+            sys.exit(0)
 
 
 if __name__ == "__main__":
