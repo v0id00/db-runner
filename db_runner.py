@@ -611,6 +611,7 @@ def format_results(
     log_format: str,
     dry_run: bool,
     timestamp: str,
+    sql_file_label: Optional[str] = None,
 ) -> str:
     """Render results to a string in the requested format."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
@@ -622,6 +623,7 @@ def format_results(
         payload = {
             "timestamp": timestamp,
             "dry_run": dry_run,
+            "sql_file": sql_file_label,
             "sql": sql,
             "summary": {"total": len(results), "ok": ok_count, "err": err_count, "dry": dry_count},
             "results": sorted_results,
@@ -638,8 +640,9 @@ def format_results(
 
     # plain (default)
     dry_tag = "  [DRY RUN]" if dry_run else ""
+    file_tag = f"  [{sql_file_label}]" if sql_file_label else ""
     lines = [
-        f"# db-runner Log — {timestamp}{dry_tag}",
+        f"# db-runner Log — {timestamp}{dry_tag}{file_tag}",
         f"# Total: {len(results)}  Successful: {ok_count}  Failed: {err_count}"
         + (f"  DryRun: {dry_count}" if dry_run else ""),
         "#",
@@ -673,6 +676,7 @@ def show_log(
     dry_run: bool = False,
     log_format: str = "plain",
     failed_output: Optional[str] = None,
+    sql_file_label: Optional[str] = None,
 ) -> None:
     """Display results in a summary panel and in vim; optionally save to file."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
@@ -690,10 +694,11 @@ def show_log(
             f"[green]Successful:[/] {ok_count}   [red]Failed:[/] {err_count}   "
             f"[dim]Total: {len(results)}[/]"
         )
+    title_extra = f" — {sql_file_label}" if sql_file_label else ""
     console.print()
     console.print(Panel(
         summary_text,
-        title="[bold]Result Summary[/]",
+        title=f"[bold]Result Summary{title_extra}[/]",
         border_style=summary_color,
     ))
 
@@ -708,7 +713,7 @@ def show_log(
         except OSError as exc:
             console.print(f"[red]Error: could not write failed-output:[/] {exc}")
 
-    log_content = format_results(results, sql, "plain", dry_run, timestamp)
+    log_content = format_results(results, sql, "plain", dry_run, timestamp, sql_file_label=sql_file_label)
 
     console.print("\n[bold cyan]► Opening vim[/] — viewing log [dim](:w file.log to save, :q to quit)[/]\n")
 
@@ -813,8 +818,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--sql",
+        nargs="+",
         metavar="FILE",
-        help="Read SQL from file (opens vim if not specified)",
+        help="Read SQL from file(s) (opens vim if not specified; multiple files executed sequentially)",
     )
     parser.add_argument(
         "--dry-run",
@@ -941,24 +947,29 @@ def main() -> None:
 
     # 2. Get SQL
     if args.sql:
-        try:
-            with open(args.sql) as f:
-                sql = f.read().strip()
-        except FileNotFoundError:
-            console.print(f"[red]Error:[/] SQL file not found: {args.sql}")
-            sys.exit(1)
-        if not sql:
-            console.print("[red]Error:[/] SQL file is empty.")
-            sys.exit(1)
-        console.print(f"[green]✓[/] SQL read from file: {args.sql}")
+        sql_files = args.sql  # list of filenames
+        sqls: list[tuple[Optional[str], str]] = []
+        for fname in sql_files:
+            try:
+                with open(fname) as f:
+                    content = f.read().strip()
+            except FileNotFoundError:
+                console.print(f"[red]Error:[/] SQL file not found: {fname}")
+                sys.exit(1)
+            if not content:
+                console.print(f"[red]Error:[/] SQL file is empty: {fname}")
+                sys.exit(1)
+            sqls.append((fname, content))
+            console.print(f"[green]✓[/] SQL read from file: {fname}")
     else:
-        sql = get_sql_from_vim()
-        console.print(f"[green]✓[/] SQL received ({len(sql.splitlines())} line(s)).")
+        sql_text = get_sql_from_vim()
+        console.print(f"[green]✓[/] SQL received ({len(sql_text.splitlines())} line(s)).")
+        sqls = [(None, sql_text)]
 
-    history_save(sql)
-
-    # 2b. Destructive keyword check
-    check_destructive(sql, force=args.force)
+    # 2b. Destructive check and history for all SQLs
+    for _fname, sql_text in sqls:
+        history_save(sql_text)
+        check_destructive(sql_text, force=args.force)
 
     # 3. Fetch database lists
     try:
@@ -980,25 +991,36 @@ def main() -> None:
 
     console.print(f"[green]✓[/] {len(selected)} database(s) selected.\n")
 
-    # 5-6. Execute SQL in parallel + progress
-    try:
-        results = asyncio.run(run_sql_on_all(
-            selected, connections, sql,
-            dry_run=dry_run,
-            timeout=args.timeout,
-            use_transaction=not args.no_transaction,
-            show_results=args.show_results,
-            stop_on_error=args.stop_on_error,
-            retry=args.retry,
-            delay_ms=args.delay,
-            concurrency=args.concurrency,
-        ))
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Operation interrupted.[/]")
-        sys.exit(0)
+    multi_file = len(sqls) > 1
 
-    # 7. Show log
-    show_log(results, sql, dry_run=dry_run, log_format=args.log_format, failed_output=args.failed_output)
+    # 5-6. Execute SQL in parallel + progress (once per SQL file)
+    for fname, sql_text in sqls:
+        if multi_file:
+            console.print(f"\n[bold]▶ Executing:[/] {fname}")
+        try:
+            results = asyncio.run(run_sql_on_all(
+                selected, connections, sql_text,
+                dry_run=dry_run,
+                timeout=args.timeout,
+                use_transaction=not args.no_transaction,
+                show_results=args.show_results,
+                stop_on_error=args.stop_on_error,
+                retry=args.retry,
+                delay_ms=args.delay,
+                concurrency=args.concurrency,
+            ))
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Operation interrupted.[/]")
+            sys.exit(0)
+
+        # 7. Show log
+        show_log(
+            results, sql_text,
+            dry_run=dry_run,
+            log_format=args.log_format,
+            failed_output=args.failed_output,
+            sql_file_label=fname if multi_file else None,
+        )
 
 
 if __name__ == "__main__":
