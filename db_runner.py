@@ -30,6 +30,8 @@ except ImportError:
     print("Error: aiomysql module is required. Install with: pip install aiomysql", file=sys.stderr)
     sys.exit(1)
 
+from rich import box
+from rich.align import Align
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -42,8 +44,16 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.rule import Rule
+from rich.table import Table
 
 console = Console()
+
+
+def step_rule(label: str) -> None:
+    """Print a labelled visual section separator."""
+    console.print(Rule(f"[bold cyan] {label} [/]", style="dim cyan"))
+
 
 SYSTEM_DBS = frozenset({
     "information_schema",
@@ -310,20 +320,25 @@ async def fetch_databases_for(conn: dict) -> tuple[str, list[str], Optional[str]
 
 async def fetch_all_databases(connections: list[dict]) -> dict[str, list[str]]:
     """Fetch database lists from all servers concurrently."""
-    console.print("\n[bold]Fetching database lists...[/]")
-
     tasks = [fetch_databases_for(conn) for conn in connections]
-    results = await asyncio.gather(*tasks)
+    fetch_results = await asyncio.gather(*tasks)
+
+    table = Table(box=box.SIMPLE, show_header=True, header_style="dim", pad_edge=False)
+    table.add_column("", width=2, no_wrap=True)
+    table.add_column("Server", style="bold")
+    table.add_column("Databases", justify="right", style="cyan")
+    table.add_column("Info", style="dim")
 
     db_map: dict[str, list[str]] = {}
-    for name, dbs, error in results:
+    for name, dbs, error in fetch_results:
         if error:
-            console.print(f"  [red]✗ {name}:[/] {error}")
+            table.add_row("[red]✗[/]", f"[red]{name}[/]", "─", error)
         else:
-            console.print(f"  [green]✓ {name}:[/] {len(dbs)} database(s)")
+            table.add_row("[green]✓[/]", name, str(len(dbs)), "")
             if dbs:
                 db_map[name] = dbs
 
+    console.print(table)
     return db_map
 
 
@@ -590,17 +605,18 @@ async def run_sql_on_all(
         task_id = None
     else:
         progress = Progress(
-            SpinnerColumn(),
+            SpinnerColumn(spinner_name="dots"),
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(bar_width=40),
+            BarColumn(bar_width=None, complete_style="cyan", finished_style="green"),
             MofNCompleteColumn(),
             TaskProgressColumn(),
-            TextColumn("•"),
+            TextColumn("[dim]·[/]"),
             TimeElapsedColumn(),
-            TextColumn("ETA:"),
+            TextColumn("[dim]ETA[/]"),
             TimeRemainingColumn(),
             console=console,
             transient=False,
+            expand=True,
         )
         dry_label = " [yellow](DRY RUN)[/]" if dry_run else ""
         progress.start()
@@ -654,6 +670,12 @@ async def run_sql_on_all(
             done_label = f"[{status_color}]✓ Done[/]  [green]{ok} successful[/]  [red]{err} failed[/]"
         progress.update(task_id, description=done_label)
         progress.stop()
+        if dry_run:
+            console.print(Rule("[yellow]Dry run complete[/]", style="yellow"))
+        elif err == 0:
+            console.print(Rule("[green]✓  All operations successful[/]", style="green"))
+        else:
+            console.print(Rule(f"[yellow]Done  ·  {ok} succeeded  ·  {err} failed[/]", style="yellow"))
         wait_for_keypress()
 
     return results
@@ -748,19 +770,29 @@ def show_log(
     # Print summary to terminal
     if dry_run:
         summary_color = "yellow"
-        summary_text = f"[yellow]DRY RUN[/]  {dry_count} database(s) would be targeted"
     else:
         summary_color = "green" if err_count == 0 else "yellow" if ok_count > 0 else "red"
-        summary_text = (
-            f"[green]Successful:[/] {ok_count}   [red]Failed:[/] {err_count}   "
-            f"[dim]Total: {len(results)}[/]"
-        )
     title_extra = f" — {sql_file_label}" if sql_file_label else ""
+
+    stats = Table(box=box.SIMPLE, show_header=False, pad_edge=False, padding=(0, 2))
+    stats.add_column("metric")
+    stats.add_column("count", justify="right", min_width=4)
+    if dry_run:
+        stats.add_row("[yellow]◆  Dry run targets[/]", f"[bold yellow]{dry_count}[/]")
+    else:
+        stats.add_row("[green]✓  Successful[/]", f"[bold green]{ok_count}[/]")
+        stats.add_row(
+            "[red]✗  Failed[/]" if err_count else "[dim]✗  Failed[/]",
+            f"[bold red]{err_count}[/]" if err_count else f"[dim]{err_count}[/]",
+        )
+        stats.add_row("[dim]   Total[/]", f"[dim]{len(results)}[/]")
     console.print()
     console.print(Panel(
-        summary_text,
+        stats,
         title=f"[bold]Result Summary{title_extra}[/]",
         border_style=summary_color,
+        expand=False,
+        padding=(0, 2),
     ))
 
     # Save failed DBs to a separate file
@@ -1055,14 +1087,18 @@ def main() -> None:
 
     dry_run: bool = args.dry_run
 
-    header_extra = "  [yellow bold][DRY RUN][/]" if dry_run else ""
+    dry_badge = "\n\n[bold yellow]◆  DRY RUN  ─  no changes will be made[/]" if dry_run else ""
     console.print(Panel(
-        f"[bold cyan]db-runner[/]  —  MySQL/MariaDB Bulk SQL Tool{header_extra}\n"
-        "[dim]You can press Ctrl+C at any time to exit[/]",
+        Align.center(
+            f"[bold cyan]db-runner[/]\n[dim]MySQL / MariaDB  ·  Bulk SQL Tool[/]{dry_badge}"
+        ),
         border_style="cyan",
+        padding=(1, 4),
+        subtitle="[dim]Ctrl+C to cancel[/]",
     ))
 
     # 1. Load connections
+    step_rule("Connections")
     connections = load_connections(args.connections, vault_path=args.vault)
     console.print(f"[green]✓[/] {len(connections)} server connection(s) loaded.")
 
@@ -1082,6 +1118,7 @@ def main() -> None:
         console.print(f"[dim]--tags filter '{args.tags}': {len(connections)} connection(s) matched.[/]")
 
     # 2. Get SQL
+    step_rule("SQL")
     if args.sql:
         sql_files = args.sql  # list of filenames
         sqls: list[tuple[Optional[str], str]] = []
@@ -1108,6 +1145,7 @@ def main() -> None:
         check_destructive(sql_text, force=args.force)
 
     # 3. Fetch database lists
+    step_rule("Databases")
     try:
         db_map = asyncio.run(fetch_all_databases(connections))
     except KeyboardInterrupt:
@@ -1130,9 +1168,10 @@ def main() -> None:
     multi_file = len(sqls) > 1
 
     # 5-6. Execute SQL in parallel + progress (once per SQL file)
+    step_rule("Execute")
     for fname, sql_text in sqls:
         if multi_file:
-            console.print(f"\n[bold]▶ Executing:[/] {fname}")
+            console.print(Rule(f"[dim]{fname}[/]", style="dim", align="left"))
         try:
             results = asyncio.run(run_sql_on_all(
                 selected, connections, sql_text,
