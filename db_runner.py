@@ -815,16 +815,29 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
   [cyan]db-runner[/] [options]
 
 [bold]OPTIONS[/]
-  [green]-c, --connections[/] [dim]FILE[/]    Connection configuration file (default: [dim]connections.json[/])
-  [green]--sql[/] [dim]FILE[/]                Read SQL from file (opens vim if omitted)
-  [green]--dry-run[/]                   Show target DBs without executing SQL
-  [green]--force[/]                     Skip confirmation for destructive SQL
-  [green]--timeout[/] [dim]SECONDS[/]         Query timeout in seconds (default: [dim]30[/])
-  [green]--no-transaction[/]            Run in autocommit mode (no transaction)
-  [green]--log-format[/] [dim]FORMAT[/]        Log format: [dim]plain[/] (default) [dim]| json | csv[/]
-  [green]--failed-output[/] [dim]FILE[/]      Save failed DBs in [dim]server:db[/] format to this file
-  [green]--show-results[/]              Show SELECT result rows in the log
-  [green]-h, --help[/]                  Show this help page
+  [green]-c, --connections[/] [dim]FILE[/]       Connection configuration file (default: [dim]connections.json[/])
+  [green]--sql[/] [dim]FILE [[dim]FILE ...[/]][/]       Read SQL from file(s) (opens vim if omitted; multiple = sequential)
+  [green]--dry-run[/]                      Show target DBs without executing SQL
+  [green]--force[/]                        Skip confirmation for destructive SQL
+  [green]--timeout[/] [dim]SECONDS[/]            Query timeout in seconds (default: [dim]30[/])
+  [green]--no-transaction[/]               Run in autocommit mode (no transaction)
+  [green]--log-format[/] [dim]FORMAT[/]           Log format: [dim]plain[/] (default) [dim]| json | csv[/]
+  [green]--output[/] [dim]FILE[/]                Save log to file (format controlled by [dim]--log-format[/])
+  [green]--failed-output[/] [dim]FILE[/]         Save failed DBs in [dim]server:db[/] format to this file
+  [green]--show-results[/]                 Show SELECT result rows in the log
+  [green]--dbfilter[/] [dim]REGEX[/]             Include only databases matching this regex
+  [green]--exclude-db[/] [dim]REGEX[/]           Exclude databases matching this regex
+  [green]--server[/] [dim]REGEX[/]               Filter connections by name/alias
+  [green]--tags[/] [dim]TAG1,TAG2[/]             Filter connections by tags (any match)
+  [green]--stop-on-error[/]                Halt all execution on first failure
+  [green]--retry[/] [dim]N[/]                   Retry failed databases N times (exponential backoff)
+  [green]--delay[/] [dim]MS[/]                  Per-database delay in milliseconds (rate limiting)
+  [green]--concurrency[/] [dim]N[/]              Override per-server max_connections globally
+  [green]--delimiter[/] [dim]STR[/]              Statement separator (default: [dim];[/])
+  [green]--quiet[/]                        Suppress progress bar, keypress, and vim log (CI/cron)
+  [green]--no-vim[/]                       Skip all vim steps; SQL from stdin if [dim]--sql[/] not given
+  [green]--vault[/] [dim]FILE[/]                Key=value file to override connection passwords
+  [green]-h, --help[/]                     Show this help page
 
 [bold]EXAMPLES[/]
   [dim]# Standard usage — enter SQL via vim, filter the DB list[/]
@@ -833,24 +846,42 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
   [dim]# Read SQL from file[/]
   [cyan]db-runner[/] --sql update.sql
 
+  [dim]# Run multiple SQL files sequentially[/]
+  [cyan]db-runner[/] --sql step1.sql step2.sql step3.sql
+
   [dim]# Preview which DBs would be affected (does not execute)[/]
   [cyan]db-runner[/] --dry-run --sql fix.sql
 
   [dim]# Send a DELETE query without confirmation, 60s timeout[/]
   [cyan]db-runner[/] --sql cleanup.sql --force --timeout 60
 
-  [dim]# Save SELECT results to a JSON log[/]
-  [cyan]db-runner[/] --sql report.sql --show-results --log-format json
+  [dim]# Save SELECT results to a JSON log file[/]
+  [cyan]db-runner[/] --sql report.sql --show-results --log-format json --output report.json
 
   [dim]# Different server config, write failures to a separate file[/]
   [cyan]db-runner[/] -c /etc/servers.json --failed-output retry.txt
+
+  [dim]# Only target prod servers with "eu" tag, filter DB names[/]
+  [cyan]db-runner[/] --tags prod,eu --dbfilter "^shop_" --sql patch.sql
+
+  [dim]# CI/cron: fully non-interactive, save log as CSV[/]
+  [cyan]db-runner[/] --sql fix.sql --no-vim --quiet --log-format csv --output run.csv
+
+  [dim]# Retry failures 3 times, stop on first unrecoverable error[/]
+  [cyan]db-runner[/] --sql update.sql --retry 3 --stop-on-error
+
+  [dim]# Use stored procedures with custom delimiter[/]
+  [cyan]db-runner[/] --sql procs.sql --delimiter "$$" --no-transaction
+
+  [dim]# Load passwords from vault (keep connections.json password-free)[/]
+  [cyan]db-runner[/] --vault ~/.db_vault --sql update.sql
 
 [bold]WORKFLOW[/]
   [dim]1.[/] [cyan]connections.json[/] is read (cp connections.example.json connections.json)
   [dim]2.[/] vim opens → write SQL [dim](:wq)[/]  [dim]Recent queries appear as comment lines[/]
   [dim]3.[/] DB lists are fetched from servers [dim](SHOW DATABASES)[/]
-  [dim]4.[/] vim opens → [cyan]server:db[/] list, delete lines you don't want
-  [dim]5.[/] SQL is sent in parallel (per-server Semaphore)[/]
+  [dim]4.[/] vim opens → [cyan]server.db[/] list, delete lines you don't want
+  [dim]5.[/] SQL is sent in parallel (per-server Semaphore)
   [dim]6.[/] Progress bar + ETA shown, waits for a keypress when done
   [dim]7.[/] vim log buffer opens → save with [dim]:w file.log[/]
 
@@ -862,8 +893,14 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
     "port": 3306,            ← optional, default: 3306
     "user": "myuser",
     "password": "mypass",
-    "max_connections": 3     ← optional, default: 3
+    "max_connections": 3,    ← optional, default: 3
+    "tags": ["prod", "eu"]  ← optional, used with --tags
   }[/]
+
+[bold]VAULT FILE[/]
+  A plain-text [dim]key=value[/] file, one entry per line:
+  [dim]prod-1=secretpassword
+  prod-2=anotherpassword[/]
 
 [bold]HISTORY[/]
   Every executed SQL is saved to [cyan]~/.db_runner_history[/] (last 100 queries).
