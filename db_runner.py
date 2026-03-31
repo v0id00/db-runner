@@ -365,12 +365,13 @@ async def execute_on_db(
     task_id: object,
     results: list,
     dry_run: bool = False,
+    timeout: int = 30,
 ) -> None:
     """Bir veritabanında SQL çalıştır (semaphore ile hız sınırlaması)."""
     server_name = conn["name"]
     async with semaphore:
         if dry_run:
-            await asyncio.sleep(0)  # event loop'a söz ver
+            await asyncio.sleep(0)
             results.append({
                 "server": server_name,
                 "db": db_name,
@@ -389,7 +390,9 @@ async def execute_on_db(
                 user=conn["user"],
                 password=conn["password"],
                 db=db_name,
-                connect_timeout=30,
+                connect_timeout=min(timeout, 10),
+                read_timeout=timeout,
+                write_timeout=timeout,
                 autocommit=True,
             )
             try:
@@ -424,6 +427,7 @@ async def run_sql_on_all(
     connections: list[dict],
     sql: str,
     dry_run: bool = False,
+    timeout: int = 30,
 ) -> list[dict]:
     """Seçili veritabanlarına paralel SQL gönder."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -476,6 +480,7 @@ async def run_sql_on_all(
                 task_id,
                 results,
                 dry_run=dry_run,
+                timeout=timeout,
             )
         )
 
@@ -608,6 +613,13 @@ def main() -> None:
         action="store_true",
         help="Destructive SQL (DROP/TRUNCATE/DELETE/ALTER TABLE) onayını atla",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=30,
+        metavar="SANİYE",
+        help="Sorgu timeout süresi saniye cinsinden (varsayılan: 30)",
+    )
     args = parser.parse_args()
 
     dry_run: bool = args.dry_run
@@ -666,7 +678,7 @@ def main() -> None:
 
     # 5-6. Paralel SQL çalıştır + progress
     try:
-        results = asyncio.run(run_sql_on_all(selected, connections, sql, dry_run=dry_run))
+        results = asyncio.run(run_sql_on_all(selected, connections, sql, dry_run=dry_run, timeout=args.timeout))
     except KeyboardInterrupt:
         console.print("\n[yellow]İşlem kesildi.[/]")
         sys.exit(0)
