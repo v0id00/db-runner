@@ -132,13 +132,40 @@ def load_vault(path: str) -> dict[str, str]:
     return vault
 
 
-def load_connections(path: str, vault_path: Optional[str] = None) -> list[dict]:
-    """Load and validate connections.json."""
+DEFAULT_CONFIG_PATHS = [
+    "connections.json",
+    os.path.expanduser("~/.config/db-runner/connections.json"),
+]
+
+
+def find_connections_file(explicit_path: Optional[str] = None) -> str:
+    """
+    Return the connections file path to use.
+    If explicitly given via -c, use that (and error if missing).
+    Otherwise search DEFAULT_CONFIG_PATHS in order.
+    """
+    if explicit_path:
+        return explicit_path
+    for candidate in DEFAULT_CONFIG_PATHS:
+        if os.path.exists(candidate):
+            return candidate
+    # Nothing found — return the first candidate so load_connections()
+    # can emit a meaningful 'file not found' error.
+    return DEFAULT_CONFIG_PATHS[0]
+
+
+def load_connections(path: Optional[str] = None, vault_path: Optional[str] = None) -> list[dict]:
+    """Load and validate connections file, searching default locations if path is None."""
+    resolved = find_connections_file(path)
     try:
-        with open(path) as f:
+        with open(resolved) as f:
             conns = json.load(f)
     except FileNotFoundError:
-        console.print(f"[red]Error:[/] '{path}' not found.")
+        searched = "\n  ".join(DEFAULT_CONFIG_PATHS)
+        console.print(
+            f"[red]Error:[/] connections file not found. Searched:\n  {searched}\n"
+            "Run [cyan]cp connections.example.json connections.json[/] or use [cyan]-c FILE[/]."
+        )
         sys.exit(1)
     except json.JSONDecodeError as e:
         console.print(f"[red]JSON parse error:[/] {e}")
@@ -231,11 +258,17 @@ def history_comment_block() -> str:
 # 3. Vim integration
 # ---------------------------------------------------------------------------
 
-def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
+def get_editor() -> str:
+    """Return the user's preferred editor from $VISUAL or $EDITOR, falling back to vim."""
+    return os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vim"
+
+
+def open_editor(content: str, suffix: str = ".txt", comment: str = "") -> str:
     """
-    Open a temporary file in vim and return the saved content.
-    Returns an empty string if vim exits with a non-zero code or content is unchanged.
+    Open a temporary file in the user's preferred editor and return the saved content.
+    Returns an empty string if the editor exits with a non-zero code.
     """
+    editor = get_editor()
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=suffix, delete=False, prefix="db_runner_"
     ) as f:
@@ -245,7 +278,7 @@ def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
         tmp_path = f.name
 
     try:
-        ret = subprocess.run(["vim", tmp_path])
+        ret = subprocess.run([editor, tmp_path])
         if ret.returncode != 0:
             return ""
         with open(tmp_path) as f:
@@ -258,7 +291,7 @@ def open_vim(content: str, suffix: str = ".txt", comment: str = "") -> str:
 
 
 def get_sql_from_vim(no_vim: bool = False) -> str:
-    """Get SQL input from the user via vim (appending history to the template)."""
+    """Get SQL input from the user via the preferred editor (appending history to the template)."""
     if no_vim:
         console.print("\n[bold cyan]Reading SQL from stdin...[/] (Ctrl+D to finish)\n")
         sql = sys.stdin.read().strip()
@@ -267,7 +300,8 @@ def get_sql_from_vim(no_vim: bool = False) -> str:
             sys.exit(0)
         return sql
 
-    console.print("\n[bold cyan]► Opening vim[/] — write your SQL, save and quit [dim](:wq)[/]\n")
+    editor = get_editor()
+    console.print(f"\n[bold cyan]► Opening {editor}[/] — write your SQL, save and quit [dim](:wq)[/]\n")
 
     history_block = history_comment_block()
     template = (
@@ -276,7 +310,7 @@ def get_sql_from_vim(no_vim: bool = False) -> str:
         + "-- Use semicolons (;) for multiple statements\n"
         + "-- When ready: :wq\n\n"
     )
-    content = open_vim(template, suffix=".sql")
+    content = open_editor(template, suffix=".sql")
 
     sql_lines = [
         line for line in content.splitlines()
@@ -428,12 +462,13 @@ def select_databases(
     )
 
     total = len(all_entries)
+    editor = get_editor()
     console.print(
-        f"\n[bold cyan]► Opening vim[/] — [bold]{total}[/] database(s) listed. "
+        f"\n[bold cyan]► Opening {editor}[/] — [bold]{total}[/] database(s) listed. "
         "Delete the ones you don't want to target.\n"
     )
 
-    content = open_vim("\n".join(all_entries) + "\n", suffix=".txt", comment=comment)
+    content = open_editor("\n".join(all_entries) + "\n", suffix=".txt", comment=comment)
 
     selected = []
     for line in content.splitlines():
@@ -820,7 +855,8 @@ def show_log(
 
     log_content = format_results(results, sql, "plain", dry_run, timestamp, sql_file_label=sql_file_label)
 
-    console.print("\n[bold cyan]► Opening vim[/] — viewing log [dim](:w file.log to save, :q to quit)[/]\n")
+    editor = get_editor()
+    console.print(f"\n[bold cyan]► Opening {editor}[/] — viewing log [dim](:w file.log to save, :q to quit)[/]\n")
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".log", delete=False, prefix="db_runner_log_"
@@ -829,7 +865,7 @@ def show_log(
         tmp_path = f.name
 
     try:
-        subprocess.run(["vim", tmp_path])
+        subprocess.run([editor, tmp_path])
     finally:
         try:
             os.unlink(tmp_path)
@@ -847,8 +883,11 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
   [cyan]db-runner[/] [options]
 
 [bold]OPTIONS[/]
-  [green]-c, --connections[/] [dim]FILE[/]       Connection configuration file (default: [dim]connections.json[/])
-  [green]--sql[/] [dim]FILE [[dim]FILE ...[/]][/]       Read SQL from file(s) (opens vim if omitted; multiple = sequential)
+  [green]-c, --connections[/] [dim]FILE[/]       Connection config file
+                             [dim]Default search order:[/]
+                               [dim]1. ./connections.json[/]
+                               [dim]2. ~/.config/db-runner/connections.json[/]
+  [green]--sql[/] [dim]FILE [[dim]FILE ...[/]][/]       Read SQL from file(s) (opens editor if omitted; multiple = sequential)
   [green]--dry-run[/]                      Show target DBs without executing SQL
   [green]--force[/]                        Skip confirmation for destructive SQL
   [green]--timeout[/] [dim]SECONDS[/]            Query timeout in seconds (default: [dim]30[/])
@@ -866,13 +905,13 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
   [green]--delay[/] [dim]MS[/]                  Per-database delay in milliseconds (rate limiting)
   [green]--concurrency[/] [dim]N[/]              Override per-server max_connections globally
   [green]--delimiter[/] [dim]STR[/]              Statement separator (default: [dim];[/])
-  [green]--quiet[/]                        Suppress progress bar, keypress, and vim log (CI/cron)
-  [green]--no-vim[/]                       Skip all vim steps; SQL from stdin if [dim]--sql[/] not given
+  [green]--quiet[/]                        Suppress progress bar, keypress, and editor log (CI/cron)
+  [green]--no-vim[/]                       Skip all editor steps; SQL from stdin if [dim]--sql[/] not given
   [green]--vault[/] [dim]FILE[/]                Key=value file to override connection passwords
   [green]-h, --help[/]                     Show this help page
 
 [bold]EXAMPLES[/]
-  [dim]# Standard usage — enter SQL via vim, filter the DB list[/]
+  [dim]# Standard usage — enter SQL via editor, filter the DB list[/]
   [cyan]db-runner[/]
 
   [dim]# Read SQL from file[/]
@@ -909,16 +948,27 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
   [cyan]db-runner[/] --vault ~/.db_vault --sql update.sql
 
 [bold]WORKFLOW[/]
-  [dim]1.[/] [cyan]connections.json[/] is read (cp connections.example.json connections.json)
-  [dim]2.[/] vim opens → write SQL [dim](:wq)[/]  [dim]Recent queries appear as comment lines[/]
+  [dim]1.[/] [cyan]connections.json[/] is read (searches [dim]./[/] then [dim]~/.config/db-runner/[/], or use [cyan]-c FILE[/])
+  [dim]2.[/] Editor opens → write SQL [dim](:wq)[/]  [dim]Recent queries appear as comment lines[/]
   [dim]3.[/] DB lists are fetched from servers [dim](SHOW DATABASES)[/]
-  [dim]4.[/] vim opens → [cyan]server.db[/] list, delete lines you don't want
+  [dim]4.[/] Editor opens → [cyan]server.db[/] list, delete lines you don't want
   [dim]5.[/] SQL is sent in parallel (per-server Semaphore)
   [dim]6.[/] Progress bar + ETA shown, waits for a keypress when done
-  [dim]7.[/] vim log buffer opens → save with [dim]:w file.log[/]
+  [dim]7.[/] Editor log buffer opens → save with [dim]:w file.log[/]
+
+[bold]EDITOR[/]
+  The editor is selected in order:
+    [dim]1. $VISUAL[/]  environment variable
+    [dim]2. $EDITOR[/]  environment variable
+    [dim]3. vim[/]      (fallback)
 
 [bold]CONFIGURATION[/]
-  [cyan]connections.json[/] format:
+  [cyan]connections.json[/] is searched in order:
+    [dim]1. ./connections.json[/]           (current working directory)
+    [dim]2. ~/.config/db-runner/connections.json[/]
+  Use [cyan]-c FILE[/] to specify an explicit path.
+
+  File format:
   [dim]{
     "name": "prod-1",        ← display name (optional, default: host)
     "host": "db.example.com",
@@ -954,15 +1004,15 @@ def main() -> None:
     )
     parser.add_argument(
         "-c", "--connections",
-        default="connections.json",
+        default=None,
         metavar="FILE",
-        help="Connection configuration file (default: connections.json)",
+        help="Connection config file (searches ./connections.json then ~/.config/db-runner/connections.json)",
     )
     parser.add_argument(
         "--sql",
         nargs="+",
         metavar="FILE",
-        help="Read SQL from file(s) (opens vim if not specified; multiple files executed sequentially)",
+        help="Read SQL from file(s) (opens editor if not specified; multiple files executed sequentially)",
     )
     parser.add_argument(
         "--dry-run",
@@ -1057,7 +1107,7 @@ def main() -> None:
     parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Suppress progress bar, keypress wait, and vim log (for CI/cron use)",
+        help="Suppress progress bar, keypress wait, and editor log (for CI/cron use)",
     )
     parser.add_argument(
         "--output",
@@ -1067,7 +1117,7 @@ def main() -> None:
     parser.add_argument(
         "--no-vim",
         action="store_true",
-        help="Skip all vim steps (SQL from stdin if --sql not given, select all DBs, no log viewer)",
+        help="Skip all editor steps (SQL from stdin if --sql not given, select all DBs, no log viewer)",
     )
     parser.add_argument(
         "--vault",
@@ -1099,8 +1149,9 @@ def main() -> None:
 
     # 1. Load connections
     step_rule("Connections")
+    resolved_path = find_connections_file(args.connections)
     connections = load_connections(args.connections, vault_path=args.vault)
-    console.print(f"[green]✓[/] {len(connections)} server connection(s) loaded.")
+    console.print(f"[green]✓[/] {len(connections)} server connection(s) loaded. [dim]({resolved_path})[/]")
 
     if args.server:
         connections = [c for c in connections if re.search(args.server, c["name"], re.IGNORECASE)]

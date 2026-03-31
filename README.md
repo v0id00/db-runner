@@ -11,7 +11,7 @@ Broadcast SQL to multiple MySQL/MariaDB databases in parallel.
 ## Requirements
 
 - Python 3.11+
-- `vim` (optional with `--no-vim`)
+- A terminal text editor (`vim`, `nano`, `hx`, etc.)
 - MySQL/MariaDB servers
 
 ## Installation
@@ -30,9 +30,21 @@ pipx install .
 
 ## Configuration
 
+db-runner searches for the connections file in this order:
+
+1. `./connections.json` — current working directory
+2. `~/.config/db-runner/connections.json` — user config directory
+3. An explicit path via `-c FILE`
+
+Quick start:
+
 ```bash
+# Option A: project-local file
 cp connections.example.json connections.json
-# edit connections.json with your server details
+
+# Option B: user-wide config (available from any directory)
+mkdir -p ~/.config/db-runner
+cp connections.example.json ~/.config/db-runner/connections.json
 ```
 
 `connections.json` is an array of server objects:
@@ -77,8 +89,7 @@ db-runner -c /path/to/servers.json     # use a different config file
 |--------|---------|-------------|
 | `-c, --connections FILE` | `connections.json` | Connection config file |
 | `--sql FILE [FILE ...]` | — | Read SQL from file(s); multiple files run sequentially |
-| `--dry-run` | off | Preview targeted databases without executing |
-| `--force` | off | Skip confirmation for destructive SQL |
+| `--dry-run` | off | Preview targeted databases without executing || `--force` | off | Skip confirmation for destructive SQL |
 | `--timeout SECONDS` | `30` | Per-query timeout |
 | `--no-transaction` | off | Run in autocommit mode (no rollback on error) |
 | `--log-format FORMAT` | `plain` | Log format: `plain`, `json`, or `csv` |
@@ -95,18 +106,34 @@ db-runner -c /path/to/servers.json     # use a different config file
 | `--concurrency N` | per-server | Override `max_connections` globally for this run |
 | `--delimiter STR` | `;` | Statement separator (e.g. `$$` for stored procedures) |
 | `--quiet` | off | No progress bar, no keypress, no vim log (CI/cron mode) |
-| `--no-vim` | off | Skip all vim steps; read SQL from stdin if `--sql` not given |
+| `--no-vim` | off | Skip all editor steps; read SQL from stdin if `--sql` not given |
 | `--vault FILE` | — | Load passwords from a `name=password` file |
 | `-h, --help` | — | Show the help page |
 
 ## Workflow
 
-1. **SQL input** — vim opens with your recent query history as comments
+1. **SQL input** — editor opens with your recent query history as comments
 2. **Database list** — all non-system databases are fetched from every server
-3. **Filter** — vim opens with a `server.db` list; delete lines you want to skip
+3. **Filter** — editor opens with a `server.db` list; delete lines you want to skip
 4. **Execute** — SQL runs in parallel across all selected databases
 5. **Progress** — live bar shows completed/total, success/error counts, and ETA
-6. **Log** — vim shows the full result log; save it with `:w output.log`
+6. **Log** — editor shows the full result log; save it with `:w output.log`
+
+## Editor
+
+db-runner opens the editor in this order:
+
+1. `$VISUAL` environment variable
+2. `$EDITOR` environment variable
+3. `vim` (fallback)
+
+```bash
+# Use nano
+EDITOR=nano db-runner
+
+# Or export permanently in your shell profile
+export VISUAL=hx
+```
 
 ## Filtering
 
@@ -145,7 +172,7 @@ db-runner --vault ~/.db_vault
 ## CI / Non-interactive mode
 
 ```bash
-# Fully non-interactive: read SQL from stdin, skip all vim steps
+# Fully non-interactive: read SQL from stdin, skip all editor steps
 echo "UPDATE config SET value='1' WHERE key='flag'" | \
   db-runner --no-vim --quiet --log-format csv --output run.csv
 
