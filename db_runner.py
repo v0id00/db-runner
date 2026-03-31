@@ -409,9 +409,9 @@ async def execute_on_db(
     db_name: str,
     sql: str,
     semaphore: asyncio.Semaphore,
-    progress: Progress,
-    task_id: object,
     results: list,
+    progress: Optional[Progress] = None,
+    task_id: object = None,
     dry_run: bool = False,
     timeout: int = 30,
     use_transaction: bool = True,
@@ -425,7 +425,8 @@ async def execute_on_db(
     server_name = conn["name"]
     async with semaphore:
         if stop_event and stop_event.is_set():
-            progress.advance(task_id)
+            if progress is not None:
+                progress.advance(task_id)
             return
 
         if delay_ms > 0:
@@ -441,7 +442,8 @@ async def execute_on_db(
                 "error": None,
                 "rows": None,
             })
-            progress.advance(task_id)
+            if progress is not None:
+                progress.advance(task_id)
             return
 
         last_error: Optional[Exception] = None
@@ -503,7 +505,8 @@ async def execute_on_db(
                 "error": str(last_error),
                 "rows": None,
             })
-        progress.advance(task_id)
+        if progress is not None:
+            progress.advance(task_id)
 
 
 async def run_sql_on_all(
@@ -519,6 +522,7 @@ async def run_sql_on_all(
     delay_ms: int = 0,
     concurrency: Optional[int] = None,
     delimiter: str = ";",
+    quiet: bool = False,
 ) -> list[dict]:
     """Send SQL to the selected databases in parallel."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -539,22 +543,26 @@ async def run_sql_on_all(
     stop_event = asyncio.Event() if stop_on_error else None
     results: list[dict] = []
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TaskProgressColumn(),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        TextColumn("ETA:"),
-        TimeRemainingColumn(),
-        console=console,
-        transient=False,
-    )
-    dry_label = " [yellow](DRY RUN)[/]" if dry_run else ""
-    progress.start()
-    task_id = progress.add_task(f"[cyan]Sending SQL...{dry_label}", total=len(selected))
+    if quiet:
+        progress = None
+        task_id = None
+    else:
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=40),
+            MofNCompleteColumn(),
+            TaskProgressColumn(),
+            TextColumn("•"),
+            TimeElapsedColumn(),
+            TextColumn("ETA:"),
+            TimeRemainingColumn(),
+            console=console,
+            transient=False,
+        )
+        dry_label = " [yellow](DRY RUN)[/]" if dry_run else ""
+        progress.start()
+        task_id = progress.add_task(f"[cyan]Sending SQL...{dry_label}", total=len(selected))
 
     tasks = []
     for server_name, db_name in selected:
@@ -566,7 +574,8 @@ async def run_sql_on_all(
                 "affected": 0,
                 "error": f"Server not defined: {server_name}",
             })
-            progress.advance(task_id)
+            if progress is not None:
+                progress.advance(task_id)
             continue
 
         tasks.append(
@@ -575,9 +584,9 @@ async def run_sql_on_all(
                 db_name,
                 sql,
                 semaphores[server_name],
-                progress,
-                task_id,
                 results,
+                progress=progress,
+                task_id=task_id,
                 dry_run=dry_run,
                 timeout=timeout,
                 use_transaction=use_transaction,
@@ -591,19 +600,19 @@ async def run_sql_on_all(
 
     await asyncio.gather(*tasks)
 
-    dry_count = sum(1 for r in results if r["status"] == "DRY")
-    ok = sum(1 for r in results if r["status"] == "OK")
-    err = len(results) - ok - dry_count
-    if dry_run:
-        status_color = "yellow"
-        done_label = f"[yellow]DRY RUN — {dry_count} database(s) targeted[/]"
-    else:
-        status_color = "green" if err == 0 else "yellow" if ok > 0 else "red"
-        done_label = f"[{status_color}]✓ Done[/]  [green]{ok} successful[/]  [red]{err} failed[/]"
-    progress.update(task_id, description=done_label)
-    progress.stop()
-
-    wait_for_keypress()
+    if progress is not None:
+        dry_count = sum(1 for r in results if r["status"] == "DRY")
+        ok = sum(1 for r in results if r["status"] == "OK")
+        err = len(results) - ok - dry_count
+        if dry_run:
+            status_color = "yellow"
+            done_label = f"[yellow]DRY RUN — {dry_count} database(s) targeted[/]"
+        else:
+            status_color = "green" if err == 0 else "yellow" if ok > 0 else "red"
+            done_label = f"[{status_color}]✓ Done[/]  [green]{ok} successful[/]  [red]{err} failed[/]"
+        progress.update(task_id, description=done_label)
+        progress.stop()
+        wait_for_keypress()
 
     return results
 
@@ -684,6 +693,7 @@ def show_log(
     log_format: str = "plain",
     failed_output: Optional[str] = None,
     sql_file_label: Optional[str] = None,
+    quiet: bool = False,
 ) -> None:
     """Display results in a summary panel and in vim; optionally save to file."""
     dry_count = sum(1 for r in results if r["status"] == "DRY")
@@ -719,6 +729,9 @@ def show_log(
             console.print(f"[yellow]⚠[/] {len(failed_results)} failed DB(s) written to '{failed_output}'.")
         except OSError as exc:
             console.print(f"[red]Error: could not write failed-output:[/] {exc}")
+
+    if quiet:
+        return
 
     log_content = format_results(results, sql, "plain", dry_run, timestamp, sql_file_label=sql_file_label)
 
@@ -920,6 +933,11 @@ def main() -> None:
         help="Statement delimiter for splitting SQL (default: ';')",
     )
     parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress bar, keypress wait, and vim log (for CI/cron use)",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -1022,6 +1040,7 @@ def main() -> None:
                 delay_ms=args.delay,
                 concurrency=args.concurrency,
                 delimiter=args.delimiter,
+                quiet=args.quiet,
             ))
         except KeyboardInterrupt:
             console.print("\n[yellow]Operation interrupted.[/]")
@@ -1034,6 +1053,7 @@ def main() -> None:
             log_format=args.log_format,
             failed_output=args.failed_output,
             sql_file_label=fname if multi_file else None,
+            quiet=args.quiet,
         )
 
 
