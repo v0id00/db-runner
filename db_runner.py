@@ -416,10 +416,15 @@ async def execute_on_db(
     timeout: int = 30,
     use_transaction: bool = True,
     show_results: bool = False,
+    stop_event: Optional[asyncio.Event] = None,
 ) -> None:
     """Execute SQL on one database (rate-limited by semaphore)."""
     server_name = conn["name"]
     async with semaphore:
+        if stop_event and stop_event.is_set():
+            progress.advance(task_id)
+            return
+
         if dry_run:
             await asyncio.sleep(0)
             results.append({
@@ -469,6 +474,8 @@ async def execute_on_db(
             finally:
                 connection.close()
         except Exception as e:
+            if stop_event:
+                stop_event.set()
             results.append({
                 "server": server_name,
                 "db": db_name,
@@ -489,6 +496,7 @@ async def run_sql_on_all(
     timeout: int = 30,
     use_transaction: bool = True,
     show_results: bool = False,
+    stop_on_error: bool = False,
 ) -> list[dict]:
     """Send SQL to the selected databases in parallel."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -499,6 +507,7 @@ async def run_sql_on_all(
         if server in conn_map
     }
 
+    stop_event = asyncio.Event() if stop_on_error else None
     results: list[dict] = []
 
     progress = Progress(
@@ -544,6 +553,7 @@ async def run_sql_on_all(
                 timeout=timeout,
                 use_transaction=use_transaction,
                 show_results=show_results,
+                stop_event=stop_event,
             )
         )
 
@@ -840,6 +850,11 @@ def main() -> None:
         help="Filter connections by tags (comma-separated; matches any)",
     )
     parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop execution on first failure",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -927,6 +942,7 @@ def main() -> None:
             timeout=args.timeout,
             use_transaction=not args.no_transaction,
             show_results=args.show_results,
+            stop_on_error=args.stop_on_error,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation interrupted.[/]")
