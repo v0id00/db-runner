@@ -419,6 +419,7 @@ async def execute_on_db(
     stop_event: Optional[asyncio.Event] = None,
     retry: int = 0,
     delay_ms: int = 0,
+    delimiter: str = ";",
 ) -> None:
     """Execute SQL on one database (rate-limited by semaphore)."""
     server_name = conn["name"]
@@ -457,8 +458,12 @@ async def execute_on_db(
                 )
                 try:
                     async with connection.cursor() as cursor:
-                        await asyncio.wait_for(cursor.execute(sql), timeout=timeout)
-                        affected = cursor.rowcount
+                        statements = [s.strip() for s in sql.split(delimiter) if s.strip()]
+                        affected = 0
+                        for stmt in statements:
+                            await asyncio.wait_for(cursor.execute(stmt), timeout=timeout)
+                            if cursor.rowcount > 0:
+                                affected += cursor.rowcount
                         rows = None
                         if show_results:
                             rows = await cursor.fetchall()
@@ -513,6 +518,7 @@ async def run_sql_on_all(
     retry: int = 0,
     delay_ms: int = 0,
     concurrency: Optional[int] = None,
+    delimiter: str = ";",
 ) -> list[dict]:
     """Send SQL to the selected databases in parallel."""
     conn_map = {conn["name"]: conn for conn in connections}
@@ -579,6 +585,7 @@ async def run_sql_on_all(
                 stop_event=stop_event,
                 retry=retry,
                 delay_ms=delay_ms,
+                delimiter=delimiter,
             )
         )
 
@@ -907,6 +914,12 @@ def main() -> None:
         help="Override per-server max_connections with a global concurrency limit",
     )
     parser.add_argument(
+        "--delimiter",
+        default=";",
+        metavar="STR",
+        help="Statement delimiter for splitting SQL (default: ';')",
+    )
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
@@ -1008,6 +1021,7 @@ def main() -> None:
                 retry=args.retry,
                 delay_ms=args.delay,
                 concurrency=args.concurrency,
+                delimiter=args.delimiter,
             ))
         except KeyboardInterrupt:
             console.print("\n[yellow]Operation interrupted.[/]")
