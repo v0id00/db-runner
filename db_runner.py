@@ -49,6 +49,52 @@ SYSTEM_DBS = frozenset({
     "innodb",
 })
 
+DESTRUCTIVE_KEYWORDS = (
+    r"\bDROP\b",
+    r"\bTRUNCATE\b",
+    r"\bDELETE\b",
+    r"\bALTER\s+TABLE\b",
+)
+
+
+def check_destructive(sql: str, force: bool = False) -> None:
+    """
+    SQL tehlikeli keyword içeriyorsa uyarı göster, onay iste.
+    `force=True` ise onay atlanır.
+    """
+    import re
+    found = [
+        kw.replace(r"\b", "").replace(r"\s+", " ")
+        for kw in DESTRUCTIVE_KEYWORDS
+        if re.search(kw, sql, re.IGNORECASE)
+    ]
+    if not found:
+        return
+
+    console.print()
+    console.print(Panel(
+        "[bold red]⚠ Tehlikeli SQL tespit edildi![/]\n\n"
+        f"Bulunan anahtar kelimeler: [red]{', '.join(found)}[/]\n\n"
+        "[dim]Devam etmek için onaylayın, iptal için Ctrl+C[/]",
+        border_style="red",
+        title="[bold red]Uyarı[/]",
+    ))
+
+    if force:
+        console.print("[yellow]--force ile onay atlandı.[/]")
+        return
+
+    console.print("[bold]Devam etmek için [red]EVET[/] yazın:[/] ", end="")
+    try:
+        answer = input()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]İptal edildi.[/]")
+        sys.exit(0)
+
+    if answer.strip().upper() != "EVET":
+        console.print("[yellow]İptal edildi.[/]")
+        sys.exit(0)
+
 
 # ---------------------------------------------------------------------------
 # 1. Bağlantı konfigürasyonu
@@ -557,6 +603,11 @@ def main() -> None:
         action="store_true",
         help="SQL çalıştırmadan hedef veritabanlarını göster",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Destructive SQL (DROP/TRUNCATE/DELETE/ALTER TABLE) onayını atla",
+    )
     args = parser.parse_args()
 
     dry_run: bool = args.dry_run
@@ -589,6 +640,9 @@ def main() -> None:
         console.print(f"[green]✓[/] SQL alındı ({len(sql.splitlines())} satır).")
 
     history_save(sql)
+
+    # 2b. Destructive keyword kontrolü
+    check_destructive(sql, force=args.force)
 
     # 3. Veritabanı listelerini çek
     try:
