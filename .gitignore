@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+# Gerçek bağlantı bilgilerini commit etme
+# connections.json dosyasını kopyalayıp düzenleyin
+connections.local.json
