@@ -18,6 +18,18 @@ Broadcast SQL to multiple MySQL/MariaDB databases in parallel.
 ## Installation
 
 ```bash
+pipx install db-runner
+```
+
+Or with pip:
+
+```bash
+pip install db-runner
+```
+
+**From source** (latest unreleased code):
+
+```bash
 pipx install git+https://github.com/v0id00/db-runner.git
 ```
 
