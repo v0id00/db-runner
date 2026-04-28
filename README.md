@@ -11,19 +11,20 @@ Broadcast SQL to multiple MySQL/MariaDB databases in parallel.
 ## Requirements
 
 - Python 3.11+
+- Linux or macOS (Windows is not supported — relies on POSIX terminal APIs)
 - A terminal text editor (`vim`, `nano`, `hx`, etc.)
 - MySQL/MariaDB servers
 
 ## Installation
 
 ```bash
-pipx install git+https://github.com/your-username/db-runner.git
+pipx install git+https://github.com/v0id00/db-runner.git
 ```
 
 Or from a local clone:
 
 ```bash
-git clone https://github.com/your-username/db-runner.git
+git clone https://github.com/v0id00/db-runner.git
 cd db-runner
 pipx install .
 ```

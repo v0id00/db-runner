@@ -9,10 +9,34 @@ description = "Broadcast SQL to multiple MySQL/MariaDB databases in parallel"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [
+    { name = "v0id00", url = "https://github.com/v0id00" },
+]
+keywords = ["mysql", "mariadb", "sql", "database", "bulk", "parallel", "cli"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: Unix",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Utilities",
+]
 dependencies = [
     "aiomysql>=0.2.0",
     "rich>=13.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/v0id00/db-runner"
+Repository = "https://github.com/v0id00/db-runner"
+"Bug Tracker" = "https://github.com/v0id00/db-runner/issues"
 
 [project.scripts]
 db-runner = "db_runner:main"
