@@ -10,9 +10,13 @@ jobs:
   build-and-publish:
     name: Build and publish to PyPI
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed to check existing tags
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,8 +29,33 @@ jobs:
       - name: Build package
         run: python -m build
 
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(python3 -c "import tomllib; print(tomllib.loads(open('pyproject.toml').read())['project']['version'])")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: twine upload --skip-existing dist/*
+
+      - name: Check if release exists
+        id: release_check
+        run: |
+          if git tag -l "${{ steps.version.outputs.tag }}" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        if: steps.release_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          files: dist/*
+          generate_release_notes: true
