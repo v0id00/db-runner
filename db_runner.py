@@ -24,11 +24,35 @@ import tty
 from datetime import datetime
 from typing import Optional
 
+import importlib.metadata
+
 try:
     import aiomysql
 except ImportError:
     print("Error: aiomysql module is required. Install with: pip install aiomysql", file=sys.stderr)
     sys.exit(1)
+
+try:
+    import asyncpg
+    HAS_ASYNCPG = True
+except ImportError:
+    asyncpg = None  # type: ignore
+    HAS_ASYNCPG = False
+
+try:
+    from sshtunnel import SSHTunnelForwarder
+    HAS_SSHTUNNEL = True
+except ImportError:
+    SSHTunnelForwarder = None  # type: ignore
+    HAS_SSHTUNNEL = False
+
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    Fernet = None  # type: ignore
+    InvalidToken = Exception  # type: ignore
+    HAS_CRYPTOGRAPHY = False
 
 from rich import box
 from rich.align import Align
@@ -61,6 +85,10 @@ SYSTEM_DBS = frozenset({
     "performance_schema",
     "sys",
     "innodb",
+})
+
+SYSTEM_DBS_PG = frozenset({
+    "postgres", "template0", "template1",
 })
 
 DESTRUCTIVE_KEYWORDS = (
@@ -113,22 +141,43 @@ def check_destructive(sql: str, force: bool = False) -> None:
 # 1. Connection configuration
 # ---------------------------------------------------------------------------
 
-def load_vault(path: str) -> dict[str, str]:
-    """Load password vault from a key=value file."""
+def load_vault(path: str, key: Optional[str] = None) -> dict[str, str]:
+    """Load password vault from a key=value file (plaintext or Fernet-encrypted)."""
     vault: dict[str, str] = {}
     try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if line and "=" in line:
-                    key, _, value = line.partition("=")
-                    vault[key.strip()] = value.strip()
+        with open(path, "rb") as f:
+            data = f.read()
     except FileNotFoundError:
         console.print(f"[red]Error:[/] vault file not found: {path}")
         sys.exit(1)
     except OSError as exc:
         console.print(f"[red]Error:[/] could not read vault file: {exc}")
         sys.exit(1)
+
+    # Check if encrypted (Fernet tokens start with "gAAAA" base64-encoded)
+    if data.startswith(b"gAAAA") or data.startswith(b"GAAAA"):
+        if not HAS_CRYPTOGRAPHY:
+            console.print("[red]Error:[/] cryptography package required for encrypted vaults. Run: pip install db-runner[vault]")
+            sys.exit(1)
+        vault_key = key or os.environ.get("DB_RUNNER_VAULT_KEY")
+        if not vault_key:
+            console.print("[red]Error:[/] encrypted vault requires a key. Use --vault-key or set DB_RUNNER_VAULT_KEY env var.")
+            sys.exit(1)
+        try:
+            data = Fernet(vault_key.encode()).decrypt(data)
+        except InvalidToken:
+            console.print("[red]Error:[/] vault decryption failed: wrong key.")
+            sys.exit(1)
+        except Exception as exc:
+            console.print(f"[red]Error:[/] vault decryption failed: {exc}")
+            sys.exit(1)
+
+    # Parse as UTF-8 key=value text
+    for line in data.decode("utf-8").splitlines():
+        line = line.strip()
+        if line and "=" in line:
+            k, _, v = line.partition("=")
+            vault[k.strip()] = v.strip()
     return vault
 
 
@@ -154,7 +203,7 @@ def find_connections_file(explicit_path: Optional[str] = None) -> str:
     return DEFAULT_CONFIG_PATHS[0]
 
 
-def load_connections(path: Optional[str] = None, vault_path: Optional[str] = None) -> list[dict]:
+def load_connections(path: Optional[str] = None, vault_path: Optional[str] = None, vault_key: Optional[str] = None) -> list[dict]:
     """Load and validate connections file, searching default locations if path is None."""
     resolved = find_connections_file(path)
     try:
@@ -181,13 +230,17 @@ def load_connections(path: Optional[str] = None, vault_path: Optional[str] = Non
         if missing:
             console.print(f"[red]Error:[/] Connection #{i} missing fields: {', '.join(missing)}")
             sys.exit(1)
-        conn.setdefault("port", 3306)
+        conn.setdefault("db_type", "mysql")
+        if conn.get("db_type") == "postgresql":
+            conn.setdefault("port", 5432)
+        else:
+            conn.setdefault("port", 3306)
         conn.setdefault("name", conn["host"])
         conn.setdefault("max_connections", 3)
         conn.setdefault("tags", [])
 
     if vault_path:
-        vault = load_vault(vault_path)
+        vault = load_vault(vault_path, key=vault_key)
         for conn in conns:
             if conn["name"] in vault:
                 conn["password"] = vault[conn["name"]]
@@ -329,13 +382,13 @@ def get_sql_from_vim(no_vim: bool = False) -> str:
 # 3. Fetching database lists
 # ---------------------------------------------------------------------------
 
-async def fetch_databases_for(conn: dict) -> tuple[str, list[str], Optional[str]]:
-    """Fetch the database list from a single server."""
+async def fetch_databases_for_mysql(conn: dict) -> tuple[str, list[str], Optional[str]]:
+    """Fetch the database list from a single MySQL/MariaDB server."""
     name = conn["name"]
     try:
         connection = await aiomysql.connect(
-            host=conn["host"],
-            port=conn["port"],
+            host=conn.get("_tunnel_host", conn["host"]),
+            port=conn.get("_tunnel_port", conn["port"]),
             user=conn["user"],
             password=conn["password"],
             connect_timeout=10,
@@ -350,6 +403,37 @@ async def fetch_databases_for(conn: dict) -> tuple[str, list[str], Optional[str]
             connection.close()
     except Exception as e:
         return name, [], str(e)
+
+
+async def fetch_databases_for_pg(conn: dict) -> tuple[str, list[str], Optional[str]]:
+    """Fetch the database list from a PostgreSQL server."""
+    name = conn["name"]
+    try:
+        connection = await asyncpg.connect(
+            host=conn.get("_tunnel_host", conn["host"]),
+            port=conn.get("_tunnel_port", conn["port"]),
+            user=conn["user"], password=conn["password"],
+            timeout=10,
+        )
+        try:
+            rows = await connection.fetch(
+                "SELECT datname FROM pg_database WHERE datistemplate = false"
+            )
+            dbs = [row["datname"] for row in rows if row["datname"].lower() not in SYSTEM_DBS_PG]
+            return name, dbs, None
+        finally:
+            await connection.close()
+    except Exception as e:
+        return name, [], str(e)
+
+
+async def fetch_databases_for(conn: dict) -> tuple[str, list[str], Optional[str]]:
+    """Dispatch fetch_databases to mysql or postgresql based on db_type."""
+    if conn.get("db_type", "mysql") == "postgresql":
+        if not HAS_ASYNCPG:
+            return conn["name"], [], "asyncpg not installed. Run: pip install db-runner[postgresql]"
+        return await fetch_databases_for_pg(conn)
+    return await fetch_databases_for_mysql(conn)
 
 
 async def fetch_all_databases(connections: list[dict]) -> dict[str, list[str]]:
@@ -496,7 +580,7 @@ def wait_for_keypress(prompt: str = "\n[dim]Press any key to continue...[/]") ->
     console.print()
 
 
-async def execute_on_db(
+async def execute_on_db_mysql(
     conn: dict,
     db_name: str,
     sql: str,
@@ -513,7 +597,7 @@ async def execute_on_db(
     delay_ms: int = 0,
     delimiter: str = ";",
 ) -> None:
-    """Execute SQL on one database (rate-limited by semaphore)."""
+    """Execute SQL on one MySQL/MariaDB database (rate-limited by semaphore)."""
     server_name = conn["name"]
     async with semaphore:
         if stop_event and stop_event.is_set():
@@ -542,8 +626,8 @@ async def execute_on_db(
         for attempt in range(max(1, retry + 1)):
             try:
                 connection = await aiomysql.connect(
-                    host=conn["host"],
-                    port=conn["port"],
+                    host=conn.get("_tunnel_host", conn["host"]),
+                    port=conn.get("_tunnel_port", conn["port"]),
                     user=conn["user"],
                     password=conn["password"],
                     db=db_name,
@@ -599,6 +683,243 @@ async def execute_on_db(
             })
         if progress is not None:
             progress.advance(task_id)
+
+
+async def execute_on_db_pg(
+    conn: dict,
+    db_name: str,
+    sql: str,
+    semaphore: asyncio.Semaphore,
+    results: list,
+    progress: Optional[Progress] = None,
+    task_id: object = None,
+    dry_run: bool = False,
+    timeout: int = 30,
+    use_transaction: bool = True,
+    show_results: bool = False,
+    stop_event: Optional[asyncio.Event] = None,
+    retry: int = 0,
+    delay_ms: int = 0,
+    delimiter: str = ";",
+) -> None:
+    """Execute SQL on one PostgreSQL database (rate-limited by semaphore)."""
+    server_name = conn["name"]
+    async with semaphore:
+        if stop_event and stop_event.is_set():
+            if progress is not None:
+                progress.advance(task_id)
+            return
+
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000)
+
+        if dry_run:
+            await asyncio.sleep(0)
+            results.append({
+                "server": server_name, "db": db_name,
+                "status": "DRY", "affected": 0, "error": None, "rows": None,
+            })
+            if progress is not None:
+                progress.advance(task_id)
+            return
+
+        last_error: Optional[Exception] = None
+        for attempt in range(max(1, retry + 1)):
+            try:
+                connection = await asyncpg.connect(
+                    host=conn.get("_tunnel_host", conn["host"]),
+                    port=conn.get("_tunnel_port", conn["port"]),
+                    user=conn["user"], password=conn["password"],
+                    database=db_name, timeout=timeout,
+                )
+                try:
+                    statements = [s.strip() for s in sql.split(delimiter) if s.strip()]
+                    affected = 0
+                    rows = None
+                    if use_transaction:
+                        async with connection.transaction():
+                            for stmt in statements:
+                                if re.match(r'^\s*(SELECT|WITH)\b', stmt, re.IGNORECASE):
+                                    if show_results:
+                                        pg_rows = await asyncio.wait_for(connection.fetch(stmt), timeout=timeout)
+                                        if pg_rows:
+                                            col_names = list(pg_rows[0].keys())
+                                            rows = {"columns": col_names, "data": [list(r.values()) for r in pg_rows]}
+                                else:
+                                    result = await asyncio.wait_for(connection.execute(stmt), timeout=timeout)
+                                    parts = result.split()
+                                    if len(parts) >= 2 and parts[-1].isdigit():
+                                        affected += int(parts[-1])
+                    else:
+                        for stmt in statements:
+                            if re.match(r'^\s*(SELECT|WITH)\b', stmt, re.IGNORECASE):
+                                if show_results:
+                                    pg_rows = await asyncio.wait_for(connection.fetch(stmt), timeout=timeout)
+                                    if pg_rows:
+                                        col_names = list(pg_rows[0].keys())
+                                        rows = {"columns": col_names, "data": [list(r.values()) for r in pg_rows]}
+                            else:
+                                result = await asyncio.wait_for(connection.execute(stmt), timeout=timeout)
+                                parts = result.split()
+                                if len(parts) >= 2 and parts[-1].isdigit():
+                                    affected += int(parts[-1])
+                    results.append({
+                        "server": server_name, "db": db_name,
+                        "status": "OK", "affected": affected, "error": None, "rows": rows,
+                    })
+                finally:
+                    await connection.close()
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < retry:
+                    await asyncio.sleep(1.5 ** attempt)
+
+        if last_error is not None:
+            if stop_event:
+                stop_event.set()
+            results.append({
+                "server": server_name, "db": db_name,
+                "status": "ERR", "affected": 0, "error": str(last_error), "rows": None,
+            })
+        if progress is not None:
+            progress.advance(task_id)
+
+
+async def execute_on_db(
+    conn: dict,
+    db_name: str,
+    sql: str,
+    semaphore: asyncio.Semaphore,
+    results: list,
+    progress: Optional[Progress] = None,
+    task_id: object = None,
+    dry_run: bool = False,
+    timeout: int = 30,
+    use_transaction: bool = True,
+    show_results: bool = False,
+    stop_event: Optional[asyncio.Event] = None,
+    retry: int = 0,
+    delay_ms: int = 0,
+    delimiter: str = ";",
+) -> None:
+    """Dispatch SQL execution to mysql or postgresql backend."""
+    if conn.get("db_type", "mysql") == "postgresql":
+        await execute_on_db_pg(
+            conn, db_name, sql, semaphore, results,
+            progress=progress, task_id=task_id, dry_run=dry_run,
+            timeout=timeout, use_transaction=use_transaction,
+            show_results=show_results, stop_event=stop_event,
+            retry=retry, delay_ms=delay_ms, delimiter=delimiter,
+        )
+    else:
+        await execute_on_db_mysql(
+            conn, db_name, sql, semaphore, results,
+            progress=progress, task_id=task_id, dry_run=dry_run,
+            timeout=timeout, use_transaction=use_transaction,
+            show_results=show_results, stop_event=stop_event,
+            retry=retry, delay_ms=delay_ms, delimiter=delimiter,
+        )
+
+
+async def preview_explain_on_db(
+    conn: dict,
+    db_name: str,
+    sql: str,
+    semaphore: asyncio.Semaphore,
+    results: list,
+    delimiter: str = ";",
+    timeout: int = 30,
+) -> None:
+    """Run EXPLAIN on the first SQL statement for preview."""
+    server_name = conn["name"]
+    statements = [s.strip() for s in sql.split(delimiter) if s.strip()]
+    if not statements:
+        return
+    first_stmt = statements[0]
+    async with semaphore:
+        try:
+            db_type = conn.get("db_type", "mysql")
+            if db_type == "postgresql":
+                if not HAS_ASYNCPG:
+                    results.append({"server": server_name, "db": db_name, "explain": None, "error": "asyncpg not installed"})
+                    return
+                connection = await asyncpg.connect(
+                    host=conn.get("_tunnel_host", conn["host"]),
+                    port=conn.get("_tunnel_port", conn["port"]),
+                    user=conn["user"], password=conn["password"],
+                    timeout=timeout,
+                )
+                try:
+                    rows = await connection.fetch(f"EXPLAIN {first_stmt}")
+                    explain_text = "\n".join(str(row[0]) for row in rows)
+                    results.append({"server": server_name, "db": db_name, "explain": explain_text, "error": None})
+                finally:
+                    await connection.close()
+            else:
+                connection = await aiomysql.connect(
+                    host=conn.get("_tunnel_host", conn["host"]),
+                    port=conn.get("_tunnel_port", conn["port"]),
+                    user=conn["user"], password=conn["password"],
+                    db=db_name, connect_timeout=timeout,
+                )
+                try:
+                    async with connection.cursor() as cursor:
+                        await cursor.execute(f"EXPLAIN {first_stmt}")
+                        rows = await cursor.fetchall()
+                        col_names = [d[0] for d in cursor.description] if cursor.description else []
+                        results.append({"server": server_name, "db": db_name, "explain": {"columns": col_names, "rows": [list(r) for r in rows]}, "error": None})
+                finally:
+                    connection.close()
+        except Exception as e:
+            results.append({"server": server_name, "db": db_name, "explain": None, "error": str(e)})
+
+
+async def run_preview(
+    selected: list[tuple[str, str]],
+    connections: list[dict],
+    sql: str,
+    delimiter: str = ";",
+    timeout: int = 30,
+) -> None:
+    """Run EXPLAIN preview on all selected databases and display results."""
+    conn_map = {c["name"]: c for c in connections}
+    semaphores: dict[str, asyncio.Semaphore] = {
+        server: asyncio.Semaphore(conn_map[server].get("max_connections", 3))
+        for server in {s for s, _ in selected}
+        if server in conn_map
+    }
+    results: list[dict] = []
+    tasks = [
+        preview_explain_on_db(
+            conn_map[server_name], db_name, sql,
+            semaphores[server_name], results,
+            delimiter=delimiter, timeout=timeout,
+        )
+        for server_name, db_name in selected
+        if server_name in conn_map
+    ]
+    await asyncio.gather(*tasks)
+
+    table = Table(title="EXPLAIN Preview", box=box.SIMPLE, show_header=True, header_style="bold cyan")
+    table.add_column("Server.DB", style="bold")
+    table.add_column("EXPLAIN / Error")
+    for r in sorted(results, key=lambda x: (x["server"], x["db"])):
+        label = f"{r['server']}.{r['db']}"
+        if r["error"]:
+            table.add_row(f"[red]{label}[/]", f"[red]{r['error']}[/]")
+        elif isinstance(r["explain"], dict):
+            cols = r["explain"]["columns"]
+            rows = r["explain"]["rows"]
+            cell_lines = [" | ".join(str(v) for v in row) for row in rows]
+            if cols:
+                cell_lines.insert(0, " | ".join(cols))
+                cell_lines.insert(1, "-" * max(len(l) for l in cell_lines))
+            table.add_row(label, "\n".join(cell_lines) if cell_lines else "(no output)")
+        else:
+            table.add_row(label, str(r["explain"]) if r["explain"] else "(no output)")
+    console.print(table)
 
 
 async def run_sql_on_all(
@@ -953,6 +1274,10 @@ HELP_TEXT = """[bold cyan]db-runner[/] — Bulk SQL execution tool for MySQL/Mar
   [green]--vault[/] [dim]FILE[/]                Key=value file to override connection passwords
   [green]--no-partial-log[/]               On Ctrl+C, exit silently instead of showing completed results
   [green]--wizard[/]                       Launch interactive setup wizard to configure all options
+  [green]--preview[/]                      Run EXPLAIN on targeted databases before executing
+  [green]--vault-key[/] [dim]KEY[/]               Decryption key for Fernet-encrypted vault file (or [dim]DB_RUNNER_VAULT_KEY[/] env)
+  [green]--encrypt-vault[/] [dim]INPUT OUTPUT[/]   Encrypt vault file with Fernet (prints key to stdout)
+  [green]--version[/]                       Show program version and exit
   [green]-h, --help[/]                     Show this help page
 
 [bold]EXAMPLES[/]
@@ -1155,6 +1480,10 @@ def run_wizard() -> list[str]:
     if stop_on_error:
         argv += ["--stop-on-error"]
 
+    preview = Confirm.ask("[bold]Show EXPLAIN before running?[/]", default=False, console=console)
+    if preview:
+        argv += ["--preview"]
+
     # ── Output ─────────────────────────────────────────────────────────────
     section("Output")
     show_results = Confirm.ask("[bold]Show SELECT result rows in log?[/]", default=False, console=console)
@@ -1202,6 +1531,44 @@ def run_wizard() -> list[str]:
 
     console.print()
     return argv
+
+
+def start_ssh_tunnels(connections: list[dict]) -> list[tuple]:
+    """Start SSH tunnels for connections that have ssh_tunnel config.
+    Returns list of (tunnel, conn_name) tuples.
+    Modifies each connection in-place with _tunnel_host and _tunnel_port.
+    """
+    tunnels: list[tuple] = []
+    ssh_conns = [c for c in connections if "ssh_tunnel" in c]
+    if not ssh_conns:
+        return tunnels
+    if not HAS_SSHTUNNEL:
+        console.print("[red]Error:[/] sshtunnel is required for SSH tunnels. Run: pip install db-runner[ssh]")
+        sys.exit(1)
+    for conn in ssh_conns:
+        cfg = conn["ssh_tunnel"]
+        key_path = os.path.expanduser(cfg.get("key", "~/.ssh/id_rsa"))
+        tunnel = SSHTunnelForwarder(
+            (cfg["host"], cfg.get("port", 22)),
+            ssh_username=cfg.get("user", "ubuntu"),
+            ssh_pkey=key_path,
+            remote_bind_address=(conn["host"], conn["port"]),
+        )
+        tunnel.start()
+        conn["_tunnel_host"] = "127.0.0.1"
+        conn["_tunnel_port"] = tunnel.local_bind_port
+        tunnels.append((tunnel, conn["name"]))
+        console.print(f"[green]✓[/] SSH tunnel established for [bold]{conn['name']}[/] via {cfg['host']}")
+    return tunnels
+
+
+def stop_ssh_tunnels(tunnels: list) -> None:
+    """Stop all SSH tunnels."""
+    for tunnel, name in tunnels:
+        try:
+            tunnel.stop()
+        except Exception:
+            pass
 
 
 def main() -> None:
@@ -1344,11 +1711,56 @@ def main() -> None:
         help="Launch interactive setup wizard to configure all options before running",
     )
     parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Run EXPLAIN on targeted databases before executing",
+    )
+    parser.add_argument(
+        "--vault-key",
+        metavar="KEY",
+        help="Decryption key for Fernet-encrypted vault file (or set DB_RUNNER_VAULT_KEY env var)",
+    )
+    parser.add_argument(
+        "--encrypt-vault",
+        nargs=2,
+        metavar=("INPUT", "OUTPUT"),
+        help="Encrypt a vault file with Fernet and write to OUTPUT",
+    )
+    try:
+        _version = importlib.metadata.version('db-runner')
+    except importlib.metadata.PackageNotFoundError:
+        _version = "1.3.0"
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version}")
+    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help page",
     )
     args = parser.parse_args()
+
+    # Handle --encrypt-vault early
+    if args.encrypt_vault:
+        if not HAS_CRYPTOGRAPHY:
+            console.print("[red]Error:[/] cryptography package required. Run: pip install db-runner[vault]")
+            sys.exit(1)
+        input_path, output_path = args.encrypt_vault
+        try:
+            with open(input_path, "rb") as f:
+                plaintext = f.read()
+        except FileNotFoundError:
+            console.print(f"[red]Error:[/] input file not found: {input_path}")
+            sys.exit(1)
+        key = Fernet.generate_key()
+        token = Fernet(key).encrypt(plaintext)
+        try:
+            with open(output_path, "wb") as f:
+                f.write(token)
+        except OSError as exc:
+            console.print(f"[red]Error:[/] could not write output: {exc}")
+            sys.exit(1)
+        console.print(f"[green]✓[/] Encrypted vault written to: {output_path}")
+        console.print(f"[bold yellow]Key (save this!):[/] {key.decode()}")
+        sys.exit(0)
 
     if args.help:
         print_help()
@@ -1377,7 +1789,8 @@ def main() -> None:
     # 1. Load connections
     step_rule("Connections")
     resolved_path = find_connections_file(args.connections)
-    connections = load_connections(args.connections, vault_path=args.vault)
+    vault_key = getattr(args, 'vault_key', None) or os.environ.get("DB_RUNNER_VAULT_KEY")
+    connections = load_connections(args.connections, vault_path=args.vault, vault_key=vault_key)
     console.print(f"[green]✓[/] {len(connections)} server connection(s) loaded. [dim]({resolved_path})[/]")
 
     if args.server:
@@ -1395,104 +1808,125 @@ def main() -> None:
             sys.exit(1)
         console.print(f"[dim]--tags filter '{args.tags}': {len(connections)} connection(s) matched.[/]")
 
-    # 2. Get SQL
-    step_rule("SQL")
-    if args.sql:
-        sql_files = args.sql  # list of filenames
-        sqls: list[tuple[Optional[str], str]] = []
-        for fname in sql_files:
-            try:
-                with open(fname) as f:
-                    content = f.read().strip()
-            except FileNotFoundError:
-                console.print(f"[red]Error:[/] SQL file not found: {fname}")
-                sys.exit(1)
-            if not content:
-                console.print(f"[red]Error:[/] SQL file is empty: {fname}")
-                sys.exit(1)
-            sqls.append((fname, content))
-            console.print(f"[green]✓[/] SQL read from file: {fname}")
-    else:
-        sql_text = get_sql_from_vim(no_vim=args.no_vim)
-        console.print(f"[green]✓[/] SQL received ({len(sql_text.splitlines())} line(s)).")
-        sqls = [(None, sql_text)]
-
-    # 2b. Destructive check and history for all SQLs
-    for _fname, sql_text in sqls:
-        history_save(sql_text)
-        check_destructive(sql_text, force=args.force)
-
-    # 3. Fetch database lists
-    step_rule("Databases")
+    # Start SSH tunnels
+    tunnels = start_ssh_tunnels(connections)
     try:
-        db_map = asyncio.run(fetch_all_databases(connections))
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Cancelled.[/]")
-        sys.exit(0)
+        # 2. Get SQL
+        step_rule("SQL")
+        if args.sql:
+            sql_files = args.sql  # list of filenames
+            sqls: list[tuple[Optional[str], str]] = []
+            for fname in sql_files:
+                try:
+                    with open(fname) as f:
+                        content = f.read().strip()
+                except FileNotFoundError:
+                    console.print(f"[red]Error:[/] SQL file not found: {fname}")
+                    sys.exit(1)
+                if not content:
+                    console.print(f"[red]Error:[/] SQL file is empty: {fname}")
+                    sys.exit(1)
+                sqls.append((fname, content))
+                console.print(f"[green]✓[/] SQL read from file: {fname}")
+        else:
+            sql_text = get_sql_from_vim(no_vim=args.no_vim)
+            console.print(f"[green]✓[/] SQL received ({len(sql_text.splitlines())} line(s)).")
+            sqls = [(None, sql_text)]
 
-    if not db_map:
-        console.print("[red]Could not connect to any server, exiting.[/]")
-        sys.exit(1)
+        # 2b. Destructive check and history for all SQLs
+        for _fname, sql_text in sqls:
+            history_save(sql_text)
+            check_destructive(sql_text, force=args.force)
 
-    # 4. Filter database list
-    selected = select_databases(db_map, dbfilter=args.dbfilter, exclude_db=args.exclude_db, no_vim=args.no_vim)
-
-    if not selected:
-        console.print("[yellow]No databases selected, exiting.[/]")
-        sys.exit(0)
-
-    console.print(f"[green]✓[/] {len(selected)} database(s) selected.\n")
-
-    multi_file = len(sqls) > 1
-
-    # 5-6. Execute SQL in parallel + progress (once per SQL file)
-    step_rule("Execute")
-    for fname, sql_text in sqls:
-        if multi_file:
-            console.print(Rule(f"[dim]{fname}[/]", style="dim", align="left"))
-        partial_results: list[dict] = []
-        interrupted = False
+        # 3. Fetch database lists
+        step_rule("Databases")
         try:
-            asyncio.run(run_sql_on_all(
-                selected, connections, sql_text,
-                dry_run=dry_run,
-                timeout=args.timeout,
-                use_transaction=not args.no_transaction,
-                show_results=args.show_results,
-                stop_on_error=args.stop_on_error,
-                retry=args.retry,
-                delay_ms=args.delay,
-                concurrency=args.concurrency,
-                delimiter=args.delimiter,
-                quiet=args.quiet,
-                _results=partial_results,
-            ))
+            db_map = asyncio.run(fetch_all_databases(connections))
         except KeyboardInterrupt:
-            interrupted = True
-            console.print("\n[yellow]⚠ Execution interrupted by user.[/]")
-
-        results = partial_results
-
-        # 7. Show log — always show partial results unless --no-partial-log
-        if interrupted and (args.no_partial_log or not results):
-            if not results:
-                console.print("[dim]No operations completed before interrupt.[/]")
+            console.print("\n[yellow]Cancelled.[/]")
             sys.exit(0)
 
-        show_log(
-            results, sql_text,
-            dry_run=dry_run,
-            log_format=args.log_format,
-            failed_output=args.failed_output,
-            sql_file_label=fname if multi_file else None,
-            quiet=args.quiet,
-            output_file=args.output,
-            no_vim=args.no_vim,
-            interrupted=interrupted,
-        )
+        if not db_map:
+            console.print("[red]Could not connect to any server, exiting.[/]")
+            sys.exit(1)
 
-        if interrupted:
+        # 4. Filter database list
+        selected = select_databases(db_map, dbfilter=args.dbfilter, exclude_db=args.exclude_db, no_vim=args.no_vim)
+
+        if not selected:
+            console.print("[yellow]No databases selected, exiting.[/]")
             sys.exit(0)
+
+        console.print(f"[green]✓[/] {len(selected)} database(s) selected.\n")
+
+        # Preview step
+        if args.preview:
+            step_rule("Preview (EXPLAIN)")
+            if dry_run:
+                console.print("[dim]--preview skipped in --dry-run mode.[/]")
+            else:
+                first_sql = sqls[0][1] if sqls else ""
+                try:
+                    asyncio.run(run_preview(
+                        selected, connections, first_sql,
+                        delimiter=args.delimiter,
+                        timeout=args.timeout,
+                    ))
+                except KeyboardInterrupt:
+                    console.print("\n[yellow]Preview cancelled.[/]")
+
+        multi_file = len(sqls) > 1
+
+        # 5-6. Execute SQL in parallel + progress (once per SQL file)
+        step_rule("Execute")
+        for fname, sql_text in sqls:
+            if multi_file:
+                console.print(Rule(f"[dim]{fname}[/]", style="dim", align="left"))
+            partial_results: list[dict] = []
+            interrupted = False
+            try:
+                asyncio.run(run_sql_on_all(
+                    selected, connections, sql_text,
+                    dry_run=dry_run,
+                    timeout=args.timeout,
+                    use_transaction=not args.no_transaction,
+                    show_results=args.show_results,
+                    stop_on_error=args.stop_on_error,
+                    retry=args.retry,
+                    delay_ms=args.delay,
+                    concurrency=args.concurrency,
+                    delimiter=args.delimiter,
+                    quiet=args.quiet,
+                    _results=partial_results,
+                ))
+            except KeyboardInterrupt:
+                interrupted = True
+                console.print("\n[yellow]⚠ Execution interrupted by user.[/]")
+
+            results = partial_results
+
+            # 7. Show log — always show partial results unless --no-partial-log
+            if interrupted and (args.no_partial_log or not results):
+                if not results:
+                    console.print("[dim]No operations completed before interrupt.[/]")
+                sys.exit(0)
+
+            show_log(
+                results, sql_text,
+                dry_run=dry_run,
+                log_format=args.log_format,
+                failed_output=args.failed_output,
+                sql_file_label=fname if multi_file else None,
+                quiet=args.quiet,
+                output_file=args.output,
+                no_vim=args.no_vim,
+                interrupted=interrupted,
+            )
+
+            if interrupted:
+                sys.exit(0)
+    finally:
+        stop_ssh_tunnels(tunnels)
 
 
 if __name__ == "__main__":

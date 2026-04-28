@@ -1,6 +1,6 @@
 [
   {
-    "name": "prod-1",
+    "name": "prod-mysql-1",
     "host": "db1.example.com",
     "port": 3306,
     "user": "myuser",
@@ -9,10 +9,33 @@
     "tags": ["prod", "eu"]
   },
   {
-    "name": "prod-2",
+    "name": "prod-mysql-2",
     "host": "db2.example.com",
     "port": 3306,
     "user": "myuser",
     "password": "mypassword"
+  },
+  {
+    "name": "prod-pg-1",
+    "db_type": "postgresql",
+    "host": "pg1.example.com",
+    "port": 5432,
+    "user": "pguser",
+    "password": "pgpassword",
+    "max_connections": 2,
+    "tags": ["prod", "pg"]
+  },
+  {
+    "name": "remote-via-ssh",
+    "host": "10.0.0.5",
+    "port": 3306,
+    "user": "myuser",
+    "password": "mypassword",
+    "ssh_tunnel": {
+      "host": "jump.example.com",
+      "port": 22,
+      "user": "ubuntu",
+      "key": "~/.ssh/id_rsa"
+    }
   }
 ]
