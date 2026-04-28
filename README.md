@@ -1,5 +1,12 @@
 # db-runner
 
+[![Publish to PyPI](https://github.com/v0id00/db-runner/actions/workflows/publish.yml/badge.svg)](https://github.com/v0id00/db-runner/actions/workflows/publish.yml)
+[![PyPI](https://img.shields.io/pypi/v/db-runner)](https://pypi.org/project/db-runner/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/db-runner)](https://pypi.org/project/db-runner/)
+[![Python](https://img.shields.io/pypi/pyversions/db-runner)](https://pypi.org/project/db-runner/)
+[![License: MIT](https://img.shields.io/github/license/v0id00/db-runner)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-blue)](https://pypi.org/project/db-runner/)
+
 Broadcast SQL to multiple MySQL/MariaDB databases in parallel.
 
 - Pick which databases to target via an interactive vim buffer
